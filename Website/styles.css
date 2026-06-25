@@ -1,6 +1,6 @@
 /* Haruka Kajita VPM listing page
  * MySite(kajitaharuka.com) のブランド感に合わせたミニマルな配色・タイポグラフィ。
- * デザイントークンは MySite のものを移植し、prefers-color-scheme で light/dark を自動切替する。 */
+ * デザイントークンは MySite のものを移植。ブランドのライト配色で固定する。 */
 
 :root {
 	--bg: #FAFAF7;

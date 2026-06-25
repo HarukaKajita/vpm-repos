@@ -25,39 +25,21 @@
 	--shadow-hover: 0 2px 4px rgba(17, 17, 17, 0.06), 0 16px 36px -18px rgba(17, 17, 17, 0.18);
 
 	--maxw: 720px;
-	--font-serif: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", serif;
+	--font-display: "Gen Interface JP Display", "Hiragino Sans", system-ui, sans-serif;
 	--font-sans: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", "Segoe UI", sans-serif;
 	--font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 
 	--ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-@media (prefers-color-scheme: dark) {
-	:root {
-		--bg: #0F0E0C;
-		--elev: #16140F;
-		--tint: #1C1A14;
-		--ink: #F2EFE8;
-		--secondary: #C6C2B7;
-		--muted: #8A8579;
-		--border: rgba(242, 239, 232, 0.10);
-		--border-strong: rgba(242, 239, 232, 0.18);
-		--accent: #D4B187;
-		--accent-strong: #E8C99C;
-		--accent-on: #111111;
-		--code-bg: #1C1A14;
-		--code-text: #D6D2C5;
-		--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -16px rgba(0, 0, 0, 0.6);
-		--shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.5), 0 16px 36px -18px rgba(0, 0, 0, 0.7);
-	}
-}
+/* ライトモード固定: prefers-color-scheme: dark の上書きは行わず、ブランドのライト配色で統一する。 */
 
 * {
 	box-sizing: border-box;
 }
 
 html {
-	color-scheme: light dark;
+	color-scheme: light;
 	-webkit-text-size-adjust: 100%;
 }
 
@@ -93,7 +75,7 @@ a {
 
 .brand__name {
 	margin: 0;
-	font-family: var(--font-serif);
+	font-family: var(--font-display);
 	font-size: clamp(28px, 5vw, 40px);
 	font-weight: 700;
 	letter-spacing: -0.01em;

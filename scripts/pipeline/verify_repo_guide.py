@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 59209113612232d72d23ea9df78397e6426fff4a8931be88ec709a818e1fdf82
+# source-sha256: a9c8e5745035f790b78862b73683fbf4eae33f8c7a32061da2d2bc242f00e27b
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -192,11 +192,6 @@ class RepoContext:
             if pattern and (pattern == target or pattern in target or fnmatch.fnmatch(target, pattern)):
                 return True
         return False
-
-    def is_tracked(self, rel: str) -> bool:
-        """git 追跡済みか（ディレクトリは配下に追跡ファイルがあるかで判定する）。"""
-        rel = rel.rstrip("/")
-        return rel in self.tracked or rel in self.tracked_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -419,16 +414,27 @@ def _resolve_inside_repo(ctx: RepoContext, base: Path, target: str) -> str | Non
 
 
 def _reference_ok(ctx: RepoContext, rel: str) -> bool:
-    """リポジトリ内に実在し、かつ git 追跡済み（大文字小文字も git 基準で一致）か。"""
+    """リポジトリ内に実在するか。**大文字小文字まで一致**することを要求する。
+
+    macOS のファイルシステムは既定で大文字小文字を区別しないため、`exists()` だけだと
+    `docs/gold_standard.md` のような誤りが素通りして Linux CI や利用者側でだけ壊れる。
+    実ディレクトリの一覧と照合して厳密に判定する。追跡外のパス（`Library/` 等の
+    gitignore 対象）も正当な言及なので、git 追跡までは要求しない。
+    """
     rel = rel.rstrip("/")
     if not rel:
         return True  # リポジトリルート自身
     if any(ch in rel for ch in "*?["):
         return bool(list(ctx.root.glob(rel)))
-    if not (ctx.root / rel).exists():
-        return False
-    # 追跡外でも Unity 生成物や gitignore 対象（Library/ 等）は正当なので、
-    # 追跡集合に無い場合だけディスク実在で許す。追跡集合にある場合は大文字小文字まで一致する。
+    current = ctx.root
+    for segment in rel.split("/"):
+        try:
+            names = {entry.name for entry in current.iterdir()}
+        except OSError:
+            return False
+        if segment not in names:
+            return False
+        current = current / segment
     return True
 
 

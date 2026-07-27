@@ -9,6 +9,6 @@
   "files": {
     ".github/workflows/pipeline-verify.yml": "0326dafcfe56752b31af89c3e646306421d9e2ce71e1a37f2fdd9be28308d397",
     "docs/REPOSITORY_MAP.md": "f841bd27be81c6efabc5ee24080f4c4a56a294acc2c2907e8a30f3648f57ea24",
-    "scripts/pipeline/verify_repo_guide.py": "c957755f4ebb4acd27e1d963e1b40580038ff29fe17d8bf2aff6c688e961d65f"
+    "scripts/pipeline/verify_repo_guide.py": "26931490626637330fce2b3531fa617ede5bbdedef830dbc48407da5b22ac040"
   }
 }

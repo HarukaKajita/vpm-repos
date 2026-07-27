@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: a9c8e5745035f790b78862b73683fbf4eae33f8c7a32061da2d2bc242f00e27b
+# source-sha256: 756595e802a7a874bf12c056516274d0b5add397e97efdd5b03100b01635bb3e
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -112,6 +112,7 @@ DISTRIBUTED_GLOBS = ("scripts/pipeline/*.py",)
 CANONICAL_IN_TEMPLATE = ("docs/GOLD_STANDARD.md",)
 CANONICAL_GLOBS_IN_TEMPLATE = ("scripts/pipeline/*.py",)
 
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "+"}
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
@@ -187,9 +188,10 @@ class RepoContext:
         return result
 
     def is_waived(self, check: str, target: str) -> bool:
+        """完全一致か glob 一致のみを認める（部分文字列一致は範囲が読めないため使わない）。"""
         for waiver in self.waivers_for(check):
             pattern = str(waiver.get("target", ""))
-            if pattern and (pattern == target or pattern in target or fnmatch.fnmatch(target, pattern)):
+            if pattern and (pattern == target or fnmatch.fnmatch(target, pattern)):
                 return True
         return False
 
@@ -207,11 +209,13 @@ def run_git(root: Path, *args: str) -> str:
 
 
 def load_json(path: Path) -> dict | None:
+    """JSON をオブジェクトとして読む。壊れている・オブジェクトでない場合は None。"""
     try:
         with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
+            data = json.load(handle)
     except (OSError, json.JSONDecodeError):
         return None
+    return data if isinstance(data, dict) else None
 
 
 def is_unity_ignored_name(name: str) -> bool:
@@ -343,8 +347,11 @@ def check_00_config(ctx: RepoContext) -> None:
         if not str(waiver.get("reason", "")).strip():
             ctx.add("+", ERROR, f"{label} に reason がありません（理由の無い例外は認めない）")
         expires = waiver.get("expiresAt")
-        if expires and today and str(expires) < today:
-            ctx.add("+", ERROR, f"{label} は {expires} に期限切れです: {waiver.get('target')}")
+        if expires is not None:
+            if not ISO_DATE_RE.match(str(expires)):
+                ctx.add("+", ERROR, f"{label} の expiresAt は YYYY-MM-DD 形式で書いてください: {expires}")
+            elif today and str(expires) < today:
+                ctx.add("+", ERROR, f"{label} は {expires} に期限切れです: {waiver.get('target')}")
 
     if ctx.is_product:
         for key in ("productSlug", "saleUnit"):
@@ -532,16 +539,34 @@ def check_03_distributed_standard(ctx: RepoContext) -> None:
                 rel,
             )
 
-    if manifest:
-        for rel, expected in (manifest.get("files") or {}).items():
-            if rel not in seen:
-                ctx.add("3", ERROR, "配布台帳にあるファイルがありません。再配布してください", rel)
-                continue
-            actual = sha256_text((ctx.root / rel).read_text(encoding="utf-8"))
-            if actual != expected:
-                ctx.add("3", ERROR, "配布台帳の hash と一致しません。再配布してください", rel)
-    elif not ctx.is_standard_source and seen:
-        ctx.add("3", WARN, "pipeline/standard-manifest.json がありません（配布の鮮度を確認できません）")
+    if manifest is None:
+        ctx.add("3", ERROR, "pipeline/standard-manifest.json がありません（配布の鮮度と範囲を確認できません）")
+        return
+
+    source = manifest.get("source") or {}
+    if manifest.get("$schemaVersion") != 1:
+        ctx.add("3", ERROR, f"配布台帳の $schemaVersion が未対応です: {manifest.get('$schemaVersion')}")
+    if source.get("dirty"):
+        ctx.add("3", ERROR, "dirty な正本から配布されています（source commit が記録されていません）。再配布してください")
+    elif not source.get("commit"):
+        ctx.add("3", ERROR, "配布台帳に source commit がありません。再配布してください")
+
+    listed = set((manifest.get("files") or {}).keys())
+    for rel, expected in (manifest.get("files") or {}).items():
+        path = ctx.root / rel
+        if not path.is_file():
+            ctx.add("3", ERROR, "配布台帳にあるファイルがありません。再配布してください", rel)
+            continue
+        if sha256_text(path.read_text(encoding="utf-8")) != expected:
+            ctx.add("3", ERROR, "配布台帳の hash と一致しません。再配布してください", rel)
+    for rel in sorted(seen - listed):
+        if ctx.is_standard_source and (
+            rel in CANONICAL_IN_TEMPLATE
+            or any(fnmatch.fnmatch(rel, pattern) for pattern in CANONICAL_GLOBS_IN_TEMPLATE)
+        ):
+            continue  # テンプレートの正本そのものは配布物ではない
+        # プロファイルを縮小したときの取り残し。台帳が配布物の所有権を持つ
+        ctx.add("3", ERROR, "配布台帳に無い配布物が残っています（プロファイル変更時の取り残し。削除してください）", rel)
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +575,14 @@ def check_03_distributed_standard(ctx: RepoContext) -> None:
 
 
 def _package_has_tests(package_dir: Path) -> bool:
-    return bool(list((package_dir / "Tests").rglob("*.asmdef")))
+    """Tests asmdef と、その配下の実テストソースが両方あることを「整備済み」とする。
+
+    空の asmdef だけを置いて検査を通す抜け道を塞ぐ。
+    """
+    tests = package_dir / "Tests"
+    if not list(tests.rglob("*.asmdef")):
+        return False
+    return bool([path for path in tests.rglob("*.cs") if path.is_file()])
 
 
 def check_04_test_policy(ctx: RepoContext) -> None:
@@ -649,14 +681,24 @@ def check_06_meta_completeness(ctx: RepoContext) -> None:
 
 
 def check_07_path_length(ctx: RepoContext) -> None:
+    sale_unit = ctx.config.get("saleUnit") or {}
+    distribution = set(sale_unit.get("distribution") or [])
+    display_name = sale_unit.get("displayName")
+
     for name, package_dir, _ in ctx.packages:
         prefix = package_dir.relative_to(ctx.root).as_posix() + "/"
-        for tracked in ctx.tracked:
+        for tracked in sorted(ctx.tracked):
             if not tracked.startswith(prefix):
                 continue
-            logical = f"{name}/{tracked[len(prefix):]}"
-            if len(logical) >= MAX_PATH_LENGTH:
-                ctx.add("7", ERROR, f"パス長 {len(logical)} 字（UAS 2.1.e は 150 字未満）", logical)
+            tail = tracked[len(prefix) :]
+            # UPM 出品レイアウト（<package-name>/ 起算）
+            roots = [(f"{name}/{tail}", "UPM")]
+            # .unitypackage 出品レイアウト（Assets/<DisplayName>/ 起算）は起点が長くなる
+            if "unitypackage" in distribution and display_name:
+                roots.append((f"Assets/{display_name}/{tail}", ".unitypackage"))
+            for logical, layout in roots:
+                if len(logical) >= MAX_PATH_LENGTH:
+                    ctx.add("7", ERROR, f"パス長 {len(logical)} 字（{layout} 基準・UAS 2.1.e は 150 字未満）", logical)
 
 
 # ---------------------------------------------------------------------------

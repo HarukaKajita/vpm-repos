@@ -1,0 +1,36 @@
+# 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
+# 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
+# source: UnityTemplate_2022_3_22f1/scripts/templates/pipeline-verify.yml
+# source-sha256: 6ce9707228c6f677db216864d644de39209fc7d8413dee37aa9dfbf9f5832c36
+name: パイプライン標準準拠検査
+
+# ゴールド標準 §2.10 第 2 層の検査を CI でも走らせる。Unity は不要で Python 3 だけで動く。
+# スキルのスコープと兄弟リポジトリは CI では解決できないため、検査 10 は自動的に warn へ落ちる
+# （ローカルとリリースゲートで error として効く）。
+
+on:
+  push:
+    branches: [main, develop, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 検査スクリプト自体の回帰テスト（正本リポジトリのみ）
+        run: |
+          if [ -f scripts/pipeline/test_verify_repo_guide.py ]; then
+            python3 scripts/pipeline/test_verify_repo_guide.py
+          else
+            echo "配布先のため回帰テストはスキップします"
+          fi
+
+      - name: 標準準拠検査
+        run: python3 scripts/pipeline/verify_repo_guide.py

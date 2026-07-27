@@ -1,0 +1,11 @@
+{
+  "$schemaVersion": 1,
+  "repository": "vpm-repos",
+  "role": "infra",
+  "productSlug": null,
+  "skillRefs": [
+    "release-unity-package"
+  ],
+  "waivers": [],
+  "notes": "VPM リスティング。source.json と Website/ は人が管理し、index.json は build-listing.yml が生成する。"
+}

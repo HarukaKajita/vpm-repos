@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 567abb7909d453b186d6148a9510fc2bf7ce8a64f0160f2f7de75a9a00348aa0
+# source-sha256: cd0c95855fa3d3e8f5347f947ed93034f85a7c072efbc94d48c9f245a2df957a
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -936,6 +936,38 @@ MAT_NAME_RE = re.compile(r"^  m_Name: (.*)$", re.M)
 MAT_NULL_SCRIPT_RE = re.compile(r"^  m_Script: \{fileID: 0\}$", re.M)
 # guid を伴わない非ゼロの fileID 参照は、同じファイル内のドキュメントを指す
 MAT_LOCAL_REF_RE = re.compile(r"fileID: (-?\d+)\}")
+# Texture2D のピクセル本体。埋め込みテクスチャはここに 16 進で直列化される
+TEX_DATA_RE = re.compile(r"^  _typelessdata: ([0-9a-fA-F]+)$", re.M)
+# 未初期化メモリを表す既知の充填バイト。実データがこの 1 種類だけで埋まることはまず無い
+DEBUG_FILL_BYTES = {0xCD, 0xCC, 0xDD, 0xFD, 0xAB, 0xBA, 0xFE}
+
+
+def find_uninitialized_texture_data(text: str) -> list[str]:
+    """埋め込み Texture2D の中身が未初期化のままでないかを見る。
+
+    サブアセットのテクスチャは「入れ物を作る処理」と「焼く処理」が別なので、
+    後者を呼び忘れると**サイズも形式も正しいのに中身だけ未初期化**という
+    見た目では気づけない状態で出荷される（TAE 1.2.0 の同梱サンプル 7 点が実際にそうなった。
+    全バイトが 0xCD ＝ Half として読むと -23.2 という無意味な値）。
+
+    実データが単一のデバッグ充填バイトだけで構成されることは実質ありえないので、
+    その形だけを拾う。真っ黒（全 0x00）や単色は正当なので対象にしない。
+    """
+    problems: list[str] = []
+    for index, payload in enumerate(TEX_DATA_RE.findall(text)):
+        try:
+            data = bytes.fromhex(payload)
+        except ValueError:
+            continue
+        if len(data) < 16:
+            continue
+        values = set(data)
+        if len(values) == 1 and next(iter(values)) in DEBUG_FILL_BYTES:
+            problems.append(
+                f"埋め込みテクスチャの中身が未初期化のままです"
+                f"（{index + 1} 個目・{len(data)} バイトすべて 0x{next(iter(values)):02X}）"
+            )
+    return problems
 
 
 def scan_unity_yaml_asset(text: str) -> list[str]:
@@ -975,6 +1007,8 @@ def scan_unity_yaml_asset(text: str) -> list[str]:
         for file_id in MAT_LOCAL_REF_RE.findall(line):
             if file_id != "0" and file_id not in defined:
                 problems.append(f"同一ファイル内に解決できない参照があります: fileID {file_id}")
+
+    problems.extend(find_uninitialized_texture_data(text))
     return problems
 
 

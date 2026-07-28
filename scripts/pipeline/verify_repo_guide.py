@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 756595e802a7a874bf12c056516274d0b5add397e97efdd5b03100b01635bb3e
+# source-sha256: 567abb7909d453b186d6148a9510fc2bf7ce8a64f0160f2f7de75a9a00348aa0
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -923,6 +923,78 @@ def check_10_skill_references(ctx: RepoContext) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 検査 11: Samples~ の .mat が壊れていないこと
+#
+# Samples~ は Unity がインポートしない隠しフォルダなので、開発リポジトリを
+# 開いているだけでは破損に気づけない。実際に UMPD の同梱サンプルで、script 参照を
+# 失った sub-asset が 3 つ紛れたまま 3 バージョン出荷された（1.0.2 で除去）。
+# ---------------------------------------------------------------------------
+
+MAT_DOC_RE = re.compile(r"^--- !u!(\d+) &(-?\d+)", re.M)
+MAT_NAME_RE = re.compile(r"^  m_Name: (.*)$", re.M)
+MAT_NULL_SCRIPT_RE = re.compile(r"^  m_Script: \{fileID: 0\}$", re.M)
+# guid を伴わない非ゼロの fileID 参照は、同じファイル内のドキュメントを指す
+MAT_LOCAL_REF_RE = re.compile(r"fileID: (-?\d+)\}")
+
+
+def scan_unity_yaml_asset(text: str) -> list[str]:
+    """Unity の YAML アセットに壊れたドキュメントが無いかを見る。問題文の一覧を返す。"""
+    problems: list[str] = []
+    parts = re.split(r"^(--- !u!\d+ &-?\d+.*)$", text, flags=re.M)
+    if len(parts) < 3:
+        return problems
+
+    docs = [(parts[i], parts[i + 1]) for i in range(1, len(parts), 2)]
+    file_ids: list[str] = []
+    names: list[str] = []
+    for marker, body in docs:
+        match = MAT_DOC_RE.match(marker)
+        if not match:
+            continue
+        class_id, file_id = match.group(1), match.group(2)
+        file_ids.append(file_id)
+        name_match = MAT_NAME_RE.search(body)
+        name = name_match.group(1).strip() if name_match else ""
+        if name:
+            names.append(name)
+        # MonoBehaviour の script 参照が null = 型を解決できない残留物
+        if class_id == "114" and MAT_NULL_SCRIPT_RE.search(body):
+            problems.append(f"script 参照を失ったサブアセットがあります（&{file_id} {name}）")
+
+    for label, values in (("fileID", file_ids), ("m_Name", names)):
+        duplicates = sorted({v for v in values if values.count(v) > 1})
+        for value in duplicates:
+            problems.append(f"{label} が重複しています: {value}")
+
+    # ファイル内参照の解決（guid 付き＝外部参照は対象外）
+    defined = set(file_ids)
+    for line in text.splitlines():
+        if "guid:" in line:
+            continue
+        for file_id in MAT_LOCAL_REF_RE.findall(line):
+            if file_id != "0" and file_id not in defined:
+                problems.append(f"同一ファイル内に解決できない参照があります: fileID {file_id}")
+    return problems
+
+
+def check_11_sample_assets(ctx: RepoContext) -> None:
+    for _, package_dir, _ in ctx.packages:
+        samples = package_dir / "Samples~"
+        if not samples.is_dir():
+            continue
+        for asset in sorted(samples.rglob("*")):
+            if asset.suffix not in (".mat", ".asset") or not asset.is_file():
+                continue
+            try:
+                text = asset.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = asset.relative_to(ctx.root).as_posix()
+            for problem in scan_unity_yaml_asset(text):
+                ctx.add("11", ERROR, problem, rel)
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -1032,6 +1104,7 @@ CHECKS = (
     check_08_package_urls,
     check_09_sale_unit,
     check_10_skill_references,
+    check_11_sample_assets,
     check_extra,
 )
 

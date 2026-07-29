@@ -1,0 +1,58 @@
+#!/bin/sh
+# 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
+# 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
+# source: UnityTemplate_2022_3_22f1/scripts/templates/githooks-pre-commit
+# source-sha256: 1c227a854ba1980ef6f5e597673ae1693fea7fa7f32592d61a0dc9c17385c9f5
+# スキルのミラーが正本とずれたまま commit されるのを止める。
+#
+# **同期はしない（index も working tree も変更しない）。** 検査だけを行い、ずれていれば
+# commit を止めて修復コマンドを案内する。commit の途中で index を書き換えると
+# `git add -p` の部分ステージの意図と食い違い、`git commit -a` は未追跡ファイルを拾わないため、
+# 「hook が直したつもりで実際は不整合が commit される」状態を作りうる（2026-07-29 設計判断）。
+#
+# 自動でミラーさせる層は .claude/settings.json の PostToolUse フック（正本を編集した直後に同期）。
+# 最終的な保証は CI（.github/workflows/pipeline-verify.yml の標準準拠検査）が持つ。
+# この hook はその中間にある、手元での早期検出。
+#
+# 有効化（クローンごとに 1 回。core.hooksPath は git 追跡できないため）:
+#   git config core.hooksPath .githooks
+#
+# 注意: `git commit --no-verify` で素通りできる。だからこの hook を唯一の保証にはしない。
+
+set -e
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+# skillSync 宣言を持たないリポジトリでは何もしない（スキルのミラーを持たないリポジトリ）。
+if [ ! -f pipeline/repo.json ]; then
+  exit 0
+fi
+if ! grep -q '"skillSync"' pipeline/repo.json 2>/dev/null; then
+  exit 0
+fi
+
+if [ ! -f scripts/pipeline/verify_repo_guide.py ]; then
+  exit 0
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "pre-commit: python3 が無いためスキルミラーの検査をスキップします" >&2
+  exit 0
+fi
+
+# 検査 12 の指摘だけを取り出す（他の検査はリリースゲートと CI の担当）。
+output=$(python3 scripts/pipeline/verify_repo_guide.py 2>&1 || true)
+mirror_errors=$(printf '%s\n' "$output" | grep '^ERROR 検査12' || true)
+
+if [ -n "$mirror_errors" ]; then
+  echo "" >&2
+  echo "commit を中止しました: スキルのミラーが正本と一致していません。" >&2
+  printf '%s\n' "$mirror_errors" >&2
+  echo "" >&2
+  echo "正本（pipeline/repo.json の skillSync.sourceRoots）を編集したあとは、" >&2
+  echo "同じく skillSync.syncCommand に宣言した同期コマンドを実行してから commit してください。" >&2
+  echo "" >&2
+  exit 1
+fi
+
+exit 0

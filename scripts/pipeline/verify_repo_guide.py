@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 47cb2f6204872ba7d673e1d9ebab45b3b005a64a2eeccc2900da956fb4b6a16d
+# source-sha256: a2ae2a87ab9883e026b039f0c78a87e061d296d3badbff68f97d2e4b35a40d14
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -1038,7 +1038,21 @@ def check_11_sample_assets(ctx: RepoContext) -> None:
 # パッケージ README の訂正が正本のスキルには入ったのに、この 2 つの複製には
 # 届かないまま「画面ロック中でも撮影できる」という裏付けの無い断定が残っていた。
 #
-# 正本に対応するミラーが存在するときだけ比較する（他リポジトリ由来のスキルは対象外）。
+# **判定はディレクトリ配置の暗黙の規約ではなく、pipeline/repo.json の `skillSync` 宣言に従う。**
+# 旧実装は `Packages/` の有無で対象を決めていたため、正本をルート直下 `skills/` に置く
+# MySite を丸ごと素通りし、商品ページ規準 190 行がミラーへ届かないまま build が落ちる
+# ところまで行った（2026-07-29）。さらに「対応するミラーが無ければ continue」していたため、
+# **ミラーがまるごと欠けている状態も見逃していた**。宣言駆動にして両方を塞ぐ。
+#
+# 宣言の形（pipeline/repo.json）:
+#   "skillSync": {
+#     "sourceRoots": ["skills"],                       // glob 可。例: "Packages/*/skills"
+#     "mirrors": [".claude/skills", ".agents/skills"],
+#     "syncCommand": "node scripts/sync-skills.mjs"    // 失敗時に案内するコマンド
+#   }
+#
+# 宣言が無いのにミラーが実在する場合は「宣言漏れ」として error にする。
+# これをしないと、宣言を消すだけで検査を黙らせられてしまう。
 # ---------------------------------------------------------------------------
 
 MIRROR_SKILL_DIRS = (".claude/skills", ".agents/skills")
@@ -1062,29 +1076,95 @@ def _skill_tree(directory: Path) -> dict[str, bytes] | None:
     return tree
 
 
+def _mirror_roots_with_skills(ctx: RepoContext) -> list[str]:
+    """実体としてスキルを 1 件以上持つミラーの一覧。宣言漏れの検出に使う。"""
+    found = []
+    for mirror_root in MIRROR_SKILL_DIRS:
+        directory = ctx.root / mirror_root
+        if directory.is_dir() and any(p.is_dir() for p in directory.iterdir()):
+            found.append(mirror_root)
+    return found
+
+
 def check_12_skill_mirrors(ctx: RepoContext) -> None:
-    packages_root = ctx.root / "Packages"
-    if not packages_root.is_dir():
+    decl = ctx.config.get("skillSync")
+
+    if not isinstance(decl, dict):
+        # 宣言が無いのにミラーが実在するなら宣言漏れ。宣言を消せば検査を黙らせられる、
+        # という抜け道を塞ぐためここは error にする。
+        for mirror_root in _mirror_roots_with_skills(ctx):
+            ctx.add(
+                "12",
+                ERROR,
+                "スキルのミラーが存在しますが pipeline/repo.json に skillSync 宣言がありません。"
+                "正本・ミラー・同期コマンドを宣言してください（宣言が無いと同期を検査できません）。",
+                mirror_root,
+            )
         return
-    for skills_dir in sorted(packages_root.glob("*/skills")):
-        for source in sorted(p for p in skills_dir.iterdir() if p.is_dir()):
-            expected = _skill_tree(source)
-            if expected is None:
+
+    source_patterns = decl.get("sourceRoots")
+    mirror_roots = decl.get("mirrors")
+    sync_command = decl.get("syncCommand")
+    if not (isinstance(source_patterns, list) and source_patterns):
+        ctx.add("12", ERROR, "skillSync.sourceRoots が宣言されていません。", "pipeline/repo.json")
+        return
+    if not (isinstance(mirror_roots, list) and mirror_roots):
+        ctx.add("12", ERROR, "skillSync.mirrors が宣言されていません。", "pipeline/repo.json")
+        return
+    hint = f"同期コマンド: {sync_command}" if sync_command else "同期スクリプトを実行してください。"
+
+    # 宣言した正本の解決。1 つも解決しないなら宣言と実体が食い違っている。
+    source_dirs: list[Path] = []
+    for pattern in source_patterns:
+        source_dirs.extend(sorted(p for p in ctx.root.glob(str(pattern)) if p.is_dir()))
+    if not source_dirs:
+        ctx.add(
+            "12",
+            ERROR,
+            f"skillSync.sourceRoots が指す正本が存在しません: {', '.join(map(str, source_patterns))}",
+            "pipeline/repo.json",
+        )
+        return
+
+    sources: dict[str, Path] = {}
+    for source_dir in source_dirs:
+        for skill in sorted(p for p in source_dir.iterdir() if p.is_dir()):
+            if skill.name in sources:
+                ctx.add(
+                    "12",
+                    ERROR,
+                    f"同名のスキルが複数の正本にあります: {skill.name}（どちらをミラーすべきか決まりません）",
+                    skill.relative_to(ctx.root).as_posix(),
+                )
                 continue
-            for mirror_root in MIRROR_SKILL_DIRS:
-                mirror = ctx.root / mirror_root / source.name
-                if not mirror.is_dir():
-                    continue
-                actual = _skill_tree(mirror)
-                rel = f"{mirror_root}/{source.name}"
-                if actual is None:
-                    ctx.add("12", ERROR, "ミラーのファイルを読めません。", rel)
-                    continue
-                missing = sorted(set(expected) - set(actual))
-                extra = sorted(set(actual) - set(expected))
-                changed = sorted(k for k in set(expected) & set(actual) if expected[k] != actual[k])
-                if not (missing or extra or changed):
-                    continue
+            sources[skill.name] = skill
+    if not sources:
+        ctx.add("12", ERROR, "宣言した正本にスキルが 1 件もありません。", "pipeline/repo.json")
+        return
+
+    for mirror_root in mirror_roots:
+        mirror_root = str(mirror_root)
+        for name, source in sources.items():
+            mirror = ctx.root / mirror_root / name
+            rel = f"{mirror_root}/{name}"
+            # 旧実装はここで continue しており、ミラーがまるごと欠けていても素通りしていた。
+            if not mirror.is_dir():
+                ctx.add("12", ERROR, f"正本にあるスキルのミラーがありません。{hint}", rel)
+                continue
+
+            expected = _skill_tree(source)
+            actual = _skill_tree(mirror)
+            if expected is None:
+                ctx.add("12", ERROR, "正本のファイルを読めません。", source.relative_to(ctx.root).as_posix())
+                continue
+            if actual is None:
+                ctx.add("12", ERROR, "ミラーのファイルを読めません。", rel)
+                continue
+
+            missing = sorted(set(expected) - set(actual))
+            extra = sorted(set(actual) - set(expected))
+            changed = sorted(k for k in set(expected) & set(actual) if expected[k] != actual[k])
+            if missing or extra or changed:
                 detail = []
                 if changed:
                     detail.append("内容が違う: " + ", ".join(changed))
@@ -1095,11 +1175,40 @@ def check_12_skill_mirrors(ctx: RepoContext) -> None:
                 ctx.add(
                     "12",
                     ERROR,
-                    f"同梱スキルのミラーが正本（{source.relative_to(ctx.root).as_posix()}）と一致しません。"
-                    f"同期スクリプト（scripts/sync-agent-skills.mjs 等）を実行してください。"
-                    f" {' / '.join(detail)}",
+                    f"ミラーが正本（{source.relative_to(ctx.root).as_posix()}）と一致しません。"
+                    f"{hint} {' / '.join(detail)}",
                     rel,
                 )
+
+            # ミラーは git 追跡されて初めてエージェントの手元へ届く。
+            # 未追跡は「ローカルでは一致しているのに配布先には無い」状態になる（.meta で踏んだのと同じ型）。
+            untracked = [
+                f for f in sorted(actual) if f"{rel}/{f}" not in ctx.tracked
+            ]
+            if untracked:
+                ctx.add(
+                    "12",
+                    ERROR,
+                    f"ミラーのファイルが git 未追跡です（配布されません）: {', '.join(untracked)}",
+                    rel,
+                )
+
+        # 正本に対応しないミラーは warn に留める。同期スクリプトの意味論が 2 通りあるため:
+        # sync-agent-skills.mjs は「正本に無い別スキルのディレクトリには触れない」（他リポジトリの
+        # パッケージ由来のスキルを許す設計）、MySite の sync-skills.mjs は生成先を完全に作り直す。
+        # 前者では正当な状態なので error にはできない。ただし後者では次の同期で消えるため、
+        # どちらにせよ「気づけない状態」を作らないよう可視化はする。
+        mirror_dir = ctx.root / mirror_root
+        if mirror_dir.is_dir():
+            for orphan in sorted(p for p in mirror_dir.iterdir() if p.is_dir()):
+                if orphan.name not in sources:
+                    ctx.add(
+                        "12",
+                        WARN,
+                        "このリポジトリの正本に対応しないミラーがあります"
+                        "（他リポジトリのパッケージ由来なら正常。手で置いたなら次の同期で消える可能性があります）。",
+                        f"{mirror_root}/{orphan.name}",
+                    )
 
 
 def check_extra(ctx: RepoContext) -> None:

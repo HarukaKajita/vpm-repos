@@ -2,13 +2,13 @@
   "$schemaVersion": 1,
   "source": {
     "repository": "UnityTemplate_2022_3_22f1",
-    "commit": "8675da87049c2d209f2c11c2f2b932faafcac3d7",
+    "commit": "d9d6a90baf6927c7b6fe2e9bf38b198587315228",
     "dirty": false,
     "profile": "guide"
   },
   "files": {
     ".github/workflows/pipeline-verify.yml": "52adea8a6f6f5f384c63830a1cb210f538a582b9e55ec15158a8360418a434dd",
     "docs/REPOSITORY_MAP.md": "a103d5aa46fb5e78073e78513e3802ef8f9f44ca8d1ffc3059aa6cf40b2725a1",
-    "scripts/pipeline/verify_repo_guide.py": "40bf64a13fe86087a5ed358015121c55a16c043f05ebce34c2a61f6bd659c261"
+    "scripts/pipeline/verify_repo_guide.py": "0180a4625ed21ae7a2e5fb2a4da7663ce02eeba7cf183d4620cdf213c02c7cd3"
   }
 }

@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: cd0c95855fa3d3e8f5347f947ed93034f85a7c072efbc94d48c9f245a2df957a
+# source-sha256: 47cb2f6204872ba7d673e1d9ebab45b3b005a64a2eeccc2900da956fb4b6a16d
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -1029,6 +1029,79 @@ def check_11_sample_assets(ctx: RepoContext) -> None:
                 ctx.add("11", ERROR, problem, rel)
 
 
+# ---------------------------------------------------------------------------
+# 検査 12: 同梱スキルのミラーが正本と一致していること
+#
+# パッケージ同梱スキル（Packages/*/skills/）は、開発リポジトリで実際にエージェントが
+# 読む位置（.claude/skills/ と .agents/skills/）へ複製して git 追跡している。
+# 複製なので、正本だけを直すと黙って古いまま残る。実際に UEWCE で、商品ページと
+# パッケージ README の訂正が正本のスキルには入ったのに、この 2 つの複製には
+# 届かないまま「画面ロック中でも撮影できる」という裏付けの無い断定が残っていた。
+#
+# 正本に対応するミラーが存在するときだけ比較する（他リポジトリ由来のスキルは対象外）。
+# ---------------------------------------------------------------------------
+
+MIRROR_SKILL_DIRS = (".claude/skills", ".agents/skills")
+
+
+def _skill_tree(directory: Path) -> dict[str, bytes] | None:
+    """スキル 1 件分のファイル名→内容。読めないファイルがあれば None。
+
+    `.meta` は比較しない。正本は `Packages/` 配下なので Unity が生成するが、
+    ミラーはエージェントが読むだけで Unity にインポートされないため、
+    同期スクリプトが意図的に複製していない（両者の正しい差）。
+    """
+    tree: dict[str, bytes] = {}
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.name.endswith(".meta"):
+            continue
+        try:
+            tree[path.relative_to(directory).as_posix()] = path.read_bytes()
+        except OSError:
+            return None
+    return tree
+
+
+def check_12_skill_mirrors(ctx: RepoContext) -> None:
+    packages_root = ctx.root / "Packages"
+    if not packages_root.is_dir():
+        return
+    for skills_dir in sorted(packages_root.glob("*/skills")):
+        for source in sorted(p for p in skills_dir.iterdir() if p.is_dir()):
+            expected = _skill_tree(source)
+            if expected is None:
+                continue
+            for mirror_root in MIRROR_SKILL_DIRS:
+                mirror = ctx.root / mirror_root / source.name
+                if not mirror.is_dir():
+                    continue
+                actual = _skill_tree(mirror)
+                rel = f"{mirror_root}/{source.name}"
+                if actual is None:
+                    ctx.add("12", ERROR, "ミラーのファイルを読めません。", rel)
+                    continue
+                missing = sorted(set(expected) - set(actual))
+                extra = sorted(set(actual) - set(expected))
+                changed = sorted(k for k in set(expected) & set(actual) if expected[k] != actual[k])
+                if not (missing or extra or changed):
+                    continue
+                detail = []
+                if changed:
+                    detail.append("内容が違う: " + ", ".join(changed))
+                if missing:
+                    detail.append("ミラーに無い: " + ", ".join(missing))
+                if extra:
+                    detail.append("正本に無い: " + ", ".join(extra))
+                ctx.add(
+                    "12",
+                    ERROR,
+                    f"同梱スキルのミラーが正本（{source.relative_to(ctx.root).as_posix()}）と一致しません。"
+                    f"同期スクリプト（scripts/sync-agent-skills.mjs 等）を実行してください。"
+                    f" {' / '.join(detail)}",
+                    rel,
+                )
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -1139,6 +1212,7 @@ CHECKS = (
     check_09_sale_unit,
     check_10_skill_references,
     check_11_sample_assets,
+    check_12_skill_mirrors,
     check_extra,
 )
 

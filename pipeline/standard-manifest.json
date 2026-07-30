@@ -2,7 +2,7 @@
   "$schemaVersion": 1,
   "source": {
     "repository": "UnityTemplate_2022_3_22f1",
-    "commit": "52546a9b994cefc3b9ed402b17ee60645275cfa4",
+    "commit": "eccfa1aee880da8aead045172b64667385b7cddf",
     "dirty": false,
     "profile": "guide"
   },
@@ -10,6 +10,6 @@
     ".githooks/pre-commit": "e98f129eb0ce0dcf711934f2e1527f61cce48f6e57fff195967ae642f4cffca6",
     ".github/workflows/pipeline-verify.yml": "52adea8a6f6f5f384c63830a1cb210f538a582b9e55ec15158a8360418a434dd",
     "docs/REPOSITORY_MAP.md": "a103d5aa46fb5e78073e78513e3802ef8f9f44ca8d1ffc3059aa6cf40b2725a1",
-    "scripts/pipeline/verify_repo_guide.py": "b0f42cd80552a4b25bf50bed88f263a5d1c6e43f2ba84a090024e537ebab74a2"
+    "scripts/pipeline/verify_repo_guide.py": "b15117b42cf1477109e11138ccf970bc8f8bfeea64534eda33c835d32cac50b0"
   }
 }

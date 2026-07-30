@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: a2ae2a87ab9883e026b039f0c78a87e061d296d3badbff68f97d2e4b35a40d14
+# source-sha256: 4b683a4b872b04e402541479e078741ae06dbd00da1be131ce4d9cd501febcc3
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -113,7 +113,7 @@ CANONICAL_IN_TEMPLATE = ("docs/GOLD_STANDARD.md",)
 CANONICAL_GLOBS_IN_TEMPLATE = ("scripts/pipeline/*.py",)
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "+"}
+VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "+"}
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
 
@@ -1211,6 +1211,64 @@ def check_12_skill_mirrors(ctx: RepoContext) -> None:
                     )
 
 
+# ---------------------------------------------------------------------------
+# 検査 13: lockstep スイートの版とスイート内の依存宣言が揃っていること
+#
+# lockstep のスイートは全パッケージを同じ版で同時に出荷する。にもかかわらず
+# スイート内の `dependencies` が古い版のままだと、UPM は「その版以上」としか要求しないので、
+# **利用者が古い基盤と新しい従属パッケージを組み合わせられてしまう**。
+# 実際に TAE で、Curve / Gradient が基盤を `1.1.0` と宣言したまま 1.2.5 まで進み、
+# その組み合わせでは 1.2.4 で直したサンプラー設定消失バグが残る状態になっていた
+# （1.1.0 のリリース時だけ手で揃えており、1.2.0 以降で忘れられた。2026-07-29 に検出）。
+# 手で揃える運用は忘れるので機械で止める。
+# ---------------------------------------------------------------------------
+
+
+def check_13_suite_versions(ctx: RepoContext) -> None:
+    sale_unit = ctx.config.get("saleUnit") or {}
+    if not ctx.is_product or sale_unit.get("versionPolicy") != "lockstep":
+        return
+    members = set(sale_unit.get("packages") or [])
+    if len(members) < 2:
+        return
+
+    versions: dict[str, str] = {}
+    for name, _package_dir, meta in ctx.packages:
+        if name in members and meta.get("version"):
+            versions[name] = str(meta["version"])
+
+    distinct = sorted(set(versions.values()))
+    if len(distinct) > 1:
+        detail = ", ".join(f"{n}={v}" for n, v in sorted(versions.items()))
+        ctx.add(
+            "13",
+            ERROR,
+            f"lockstep のスイートで version が揃っていません（{detail}）",
+            "pipeline/repo.json",
+        )
+        return
+    suite_version = distinct[0] if distinct else None
+    if not suite_version:
+        return
+
+    for name, package_dir, meta in ctx.packages:
+        if name not in members:
+            continue
+        rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
+        for dep_name, dep_version in (meta.get("dependencies") or {}).items():
+            if dep_name not in members:
+                continue  # スイート外への依存はこの検査の対象外
+            if str(dep_version) != suite_version:
+                ctx.add(
+                    "13",
+                    ERROR,
+                    f"スイート内の依存宣言が版と一致しません: {dep_name} を {dep_version} と宣言していますが"
+                    f"スイートは {suite_version} です。UPM の依存は「その版以上」なので、古い宣言のままだと"
+                    f"利用者が古い {dep_name} と組み合わせられ、その版で直した不具合が残ります。",
+                    rel,
+                )
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -1322,6 +1380,7 @@ CHECKS = (
     check_10_skill_references,
     check_11_sample_assets,
     check_12_skill_mirrors,
+    check_13_suite_versions,
     check_extra,
 )
 

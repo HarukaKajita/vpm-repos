@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 4b683a4b872b04e402541479e078741ae06dbd00da1be131ce4d9cd501febcc3
+# source-sha256: eb8675929a28afc7d4f60339a6975b411d03f2a3e5f0006fa91cde7f5efabc36
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -113,7 +113,7 @@ CANONICAL_IN_TEMPLATE = ("docs/GOLD_STANDARD.md",)
 CANONICAL_GLOBS_IN_TEMPLATE = ("scripts/pipeline/*.py",)
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "+"}
+VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "+"}
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
 
@@ -1269,13 +1269,100 @@ def check_13_suite_versions(ctx: RepoContext) -> None:
                 )
 
 
+# ---------------------------------------------------------------------------
+# 検査 14: 同梱物の宣言と実体が一致していること
+#
+# `samples` は Package Manager の Samples タブに出る**宣言**で、実体との対応は Unity が確かめない。
+# 実体が無ければ利用者側でインポートに失敗し、逆に `Samples~/` へ置いただけで宣言し忘れると
+# 同梱したつもりのサンプルが Package Manager から見えないまま出荷される（GOLD_STANDARD §2.5）。
+# `Samples~` は Unity がインポートしない隠しフォルダなので、開発リポジトリを開いていても
+# どちらの向きの食い違いにも気づけない。
+#
+# `Third Party Notices.md` は UAS 1.2.a の提出要件で、成分が無い場合も「含まれない」と明記した
+# 最小ファイルを置く規約（§2.5）。無いと審査で落ちるのでリリースを止める。
+#
+# パッケージへ `CLAUDE.md` / `AGENTS.md` を同梱する場合は、リポジトリ直下（検査 1）と同じく
+# 対で同一内容にする。片方だけだと、利用者側のエージェントが Claude 系か AGENTS 規約系かで
+# 受け取る指示が変わる。
+# ---------------------------------------------------------------------------
+
+GUIDE_PAIR = ("CLAUDE.md", "AGENTS.md")
+
+
+def check_14_bundled_contents(ctx: RepoContext) -> None:
+    for name, package_dir, meta in ctx.packages:
+        package_rel = package_dir.relative_to(ctx.root).as_posix()
+        manifest_rel = f"{package_rel}/package.json"
+
+        declared: set[str] = set()
+        for index, sample in enumerate(meta.get("samples") or []):
+            label = f"samples[{index}]"
+            if not isinstance(sample, dict):
+                ctx.add("14", ERROR, f"{name}: {label} はオブジェクトである必要があります", manifest_rel)
+                continue
+            for key in ("displayName", "description", "path"):
+                if not str(sample.get(key) or "").strip():
+                    ctx.add("14", ERROR, f"{name}: {label} に {key} がありません", manifest_rel)
+            sample_path = str(sample.get("path") or "").strip()
+            if not sample_path:
+                continue
+            target = package_dir / sample_path
+            declared.add(os.path.normpath(target))
+            if not target.is_dir():
+                ctx.add("14", ERROR, f"{name}: {label} の path に実体がありません: {sample_path}", manifest_rel)
+
+        # 実体だけがある側の検出。`Samples~/<名前>` が慣例だが、`Samples~/<まとまり>/<名前>` と
+        # 束ねる書き方も許されるので、**直下のフォルダ配下に宣言が 1 つも無い**ときだけ落とす
+        # （束ねたフォルダ自体は宣言されないため、直下しか見ないと誤検出する）。まとまりの中で
+        # 一部だけ宣言し忘れた場合は素通りするが、まとめる構成を採るかどうかは書き手が決められる。
+        samples_dir = package_dir / "Samples~"
+        if samples_dir.is_dir():
+            for child in sorted(samples_dir.iterdir()):
+                if not child.is_dir() or child.is_symlink():
+                    continue
+                prefix = os.path.normpath(child) + os.sep
+                if any(entry == os.path.normpath(child) or entry.startswith(prefix) for entry in declared):
+                    continue
+                ctx.add(
+                    "14",
+                    ERROR,
+                    f"{name}: Samples~/{child.name} が package.json の samples に宣言されていません"
+                    f"（宣言しないと Package Manager から見えません。GOLD_STANDARD §2.5）",
+                    manifest_rel,
+                )
+
+        if not (package_dir / "Third Party Notices.md").is_file():
+            ctx.add("14", ERROR, f"{name}: Third Party Notices.md がありません（§2.5・UAS 1.2.a）", package_rel)
+
+        # パッケージ直下のガイドは購入者のエージェント向けで、2026-07-31 から必須。
+        # リポジトリ直下（開発者向け）とはファイル名が同じでも読み手が違うため、
+        # 「片方だけある」「中身が一致しない」に加えて「そもそも無い」も落とす。
+        claude, agents = package_dir / GUIDE_PAIR[0], package_dir / GUIDE_PAIR[1]
+        if not claude.is_file() and not agents.is_file():
+            ctx.add(
+                "14",
+                ERROR,
+                f"{name}: 購入者のエージェント向けの {GUIDE_PAIR[0]} / {GUIDE_PAIR[1]} がありません"
+                f"（GOLD_STANDARD §2.2・§2.5。リポジトリ直下の開発者向けガイドをコピーしないこと）",
+                package_rel,
+            )
+        elif claude.is_file() != agents.is_file():
+            present, missing = GUIDE_PAIR if claude.is_file() else GUIDE_PAIR[::-1]
+            ctx.add(
+                "14",
+                ERROR,
+                f"{name}: {present} はありますが {missing} がありません（対で同一内容にする規約）",
+                package_rel,
+            )
+        elif claude.read_bytes() != agents.read_bytes():
+            ctx.add("14", ERROR, f"{name}: 同梱の CLAUDE.md と AGENTS.md の内容が一致しません", package_rel)
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
         if not meta.get("unityRelease"):
             ctx.add("+", WARN, f"{name}: package.json に unityRelease がありません（GOLD_STANDARD §2.5）", rel)
-        if not (package_dir / "Third Party Notices.md").is_file():
-            ctx.add("+", WARN, f"{name}: Third Party Notices.md がありません（UAS 1.2.a）")
         for required in ("README.md", "CHANGELOG.md", "LICENSE.md"):
             if not (package_dir / required).is_file():
                 ctx.add("+", WARN, f"{name}: {required} がありません（GOLD_STANDARD §2.5）")
@@ -1381,6 +1468,7 @@ CHECKS = (
     check_11_sample_assets,
     check_12_skill_mirrors,
     check_13_suite_versions,
+    check_14_bundled_contents,
     check_extra,
 )
 

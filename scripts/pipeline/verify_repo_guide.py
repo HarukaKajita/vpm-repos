@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: eb8675929a28afc7d4f60339a6975b411d03f2a3e5f0006fa91cde7f5efabc36
+# source-sha256: a69c1dd396249f0827ce6dce5244576ca3b7d102a0b6f5d5e71e36772b924e12
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -113,7 +113,7 @@ CANONICAL_IN_TEMPLATE = ("docs/GOLD_STANDARD.md",)
 CANONICAL_GLOBS_IN_TEMPLATE = ("scripts/pipeline/*.py",)
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "+"}
+VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "+"}
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
 
@@ -1358,6 +1358,127 @@ def check_14_bundled_contents(ctx: RepoContext) -> None:
             ctx.add("14", ERROR, f"{name}: 同梱の CLAUDE.md と AGENTS.md の内容が一致しません", package_rel)
 
 
+# ---------------------------------------------------------------------------
+# 検査 15: 同梱スクリーンショットが UI の実装より古くないこと
+#
+# UI の文言・ラベル・活性状態・HelpBox を直しても、その UI を写した画像は取り残される。
+# 画像は「主張が散るサーフェス」の中で**唯一 grep で見つけられない面**なので、
+# 文言を直した本人が意識して探さない限り必ず置き去りになる。
+# 実際に TAE curve で、1.2.3 で直した HelpBox の文言が同梱 `inspector.png` に旧文言のまま残り、
+# 購入者が README の設定ガイドで最初に見る図として数バージョン出荷され続けた
+# （同じ画像を商品ページ 19 言語も参照していた。2026-07-31 検出）。
+#
+# 判定は git のコミット時刻という**代理指標**で、「必ず間違い」を意味しない
+# （UI に影響しないコード変更でも時刻は進む）。したがって severity は warn に留め、
+# リリースを止めるのではなく「開いて見比べろ」を出す。error にすると UI を触るたびに
+# 撮り直しか waiver を強いることになり、包括 waiver で黙らせる運用に倒れて本命の事故も見逃す。
+#
+# UI を決めるのは `Editor/`（描画コード）と `Runtime/`（Inspector が描く `[SerializeField]` と
+# その属性・範囲）、そして**リポジトリ内の翻訳カタログ**。カタログをリポジトリ全体で見るのは、
+# TAE の Curve/Gradient が自前のカタログを持たず基盤パッケージのカタログを引いており、
+# 基盤側のカタログだけを直すと従属パッケージの画像が所属パッケージを触らずに古くなるため。
+# ---------------------------------------------------------------------------
+
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+# UI を決めるパッケージ内のディレクトリ（画像との時刻比較の対象）
+UI_SOURCE_DIRS = ("Editor", "Runtime")
+# 同梱画像でも「UI を写したもの」ではない直下フォルダ。`Samples~/` は利用者のプロジェクトへ
+# 取り込まれる素材、`Tests/` は検証用の入力で、どちらも UI の見た目とは無関係に古くてよい。
+NON_SCREENSHOT_DIRS = ("Samples~", "Tests")
+
+
+def _last_commit(root: Path, *paths: str) -> tuple[int, str] | None:
+    """指定パス群の最終コミットを (epoch 秒, YYYY-MM-DD) で返す。
+
+    git が使えない・履歴に無い（浅い clone・未コミット）場合は None。
+    時刻を推測せず黙るのは検査 0 の `PIPELINE_TODAY` 解決と同じ流儀
+    （git という証拠が無いときは何も主張しない）。
+    """
+    if not paths:
+        return None
+    output = run_git(root, "log", "-1", "--format=%ct %cs", "--", *paths).split()
+    if len(output) != 2 or not output[0].isdigit():
+        return None
+    return int(output[0]), output[1]
+
+
+def _worktree_dirty_paths(root: Path) -> set[str]:
+    """作業ツリーで変更・追加されているパス（git 未追跡も含む）。"""
+    result: set[str] = set()
+    for line in run_git(root, "status", "--porcelain").splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]  # リネームは移動先だけを見る
+        result.add(path.strip('"'))
+    return result
+
+
+def check_15_stale_screenshots(ctx: RepoContext) -> None:
+    # 翻訳カタログはリポジトリ内で共有されうるので、所属パッケージで絞らない
+    locale_paths = sorted(t for t in ctx.tracked if t.endswith(".json") and "/Locales/" in t)
+
+    tracked_images = sorted(t for t in ctx.tracked if t.lower().endswith(IMAGE_SUFFIXES))
+
+    targets: list[tuple[str, Path, str, list[str]]] = []
+    for name, package_dir, _ in ctx.packages:
+        package_rel = package_dir.relative_to(ctx.root).as_posix()
+        prefix = f"{package_rel}/"
+        images = []
+        for tracked in tracked_images:
+            if not tracked.startswith(prefix):
+                continue
+            if tracked[len(prefix) :].split("/")[0] in NON_SCREENSHOT_DIRS:
+                continue
+            if ctx.is_waived("15", tracked):
+                continue
+            images.append(tracked)
+        if images:
+            targets.append((name, package_dir, package_rel, images))
+
+    if not targets:
+        return  # 同梱画像を持たないリポジトリでは git を余計に叩かない
+
+    dirty = _worktree_dirty_paths(ctx.root)
+
+    for name, package_dir, package_rel, images in targets:
+        sources: list[tuple[str, list[str]]] = [
+            (f"{directory}/", [f"{package_rel}/{directory}"])
+            for directory in UI_SOURCE_DIRS
+            if (package_dir / directory).is_dir()
+        ]
+        if locale_paths:
+            sources.append(("翻訳カタログ", locale_paths))
+
+        newest: tuple[int, str, str] | None = None
+        for label, paths in sources:
+            commit = _last_commit(ctx.root, *paths)
+            if commit and (newest is None or commit[0] > newest[0]):
+                newest = (commit[0], commit[1], label)
+        if newest is None:
+            continue  # UI 側の履歴が読めない（git が無い・浅い clone）なら何も言わない
+
+        ui_epoch, ui_date, ui_label = newest
+        for rel in images:
+            if rel in dirty:
+                continue  # 作業ツリーで触っている＝撮り直しの最中とみなす
+            commit = _last_commit(ctx.root, rel)
+            if commit is None or commit[0] >= ui_epoch:
+                continue
+            ctx.add(
+                "15",
+                WARN,
+                f"{name}: 同梱スクリーンショットが UI の実装より古いままです"
+                f"（UI は {ui_date} に {ui_label} を変更）。同梱画像は購入者が README や "
+                f"Documentation~ で最初に見る説明なので、現行 UI と食い違うと実装ではなく画像のほうを"
+                f"信じます。画像は文言を grep しても出てこない唯一のサーフェスなので、UI を直しても"
+                f"取り残されます。開いて現行 UI と見比べ、違っていれば撮り直してください"
+                f"（GOLD_STANDARD §2.5・§2.10）",
+                rel,
+            )
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -1469,6 +1590,7 @@ CHECKS = (
     check_12_skill_mirrors,
     check_13_suite_versions,
     check_14_bundled_contents,
+    check_15_stale_screenshots,
     check_extra,
 )
 

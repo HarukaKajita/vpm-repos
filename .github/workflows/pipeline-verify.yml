@@ -1,7 +1,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/templates/pipeline-verify.yml
-# source-sha256: 7c60df1aa1fed17a17c2b62484eb3307d0cae43a60ce8c05b7a9d2d3fa89ea4c
+# source-sha256: 0db9c6b5978d88dfd964548302e70d7399791b5eb1af49ba88bcd1d802b999a7
 name: パイプライン標準準拠検査
 
 # ゴールド標準 §2.10 第 2 層の検査を CI でも走らせる。Unity は不要で Python 3 だけで動く。
@@ -18,7 +18,12 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
+      # 検査 15（同梱画像の鮮度）と検査 16（同梱物の変更の記録漏れ）は履歴とタグで判定する。
+      # 既定の浅い clone だとタグが 1 つも無く、`git log -1 -- <path>` も全パスで同じ時刻を返すため、
+      # どちらも黙って空振りする（＝ CI が緑でも何も見ていない状態になる）。全履歴を取る。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

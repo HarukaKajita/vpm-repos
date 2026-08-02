@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: a69c1dd396249f0827ce6dce5244576ca3b7d102a0b6f5d5e71e36772b924e12
+# source-sha256: de84f8428b8d4d87bce277c9fbc4770e9aaa2e3c3ae90d3ab17bf0d8f6010a3e
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -22,6 +22,9 @@
   除外し、symlink はファイル・フォルダとも追跡しない。
 - パス長は **git 追跡パスの `/` 区切り論理文字列**を基準に、`.meta` を含めて計測する
   （OS のファイルシステム表現に依存させない）。
+- 「同梱物（`.tgz` に入るパス）」は `Packages/<name>/` 配下の git 追跡ファイル全部で、`.meta` も
+  `Tests/` も `Samples~` / `Documentation~` も含む（実物の tgz と `git ls-tree` の突き合わせで確認）。
+  除くのは npm / `Client.Pack` が既定で落とす OS・VCS 由来の名前だけ。
 
 正本: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
 各開発リポジトリへは scripts/distribute_standard.py が配布する（配布物は編集しない）。
@@ -113,7 +116,7 @@ CANONICAL_IN_TEMPLATE = ("docs/GOLD_STANDARD.md",)
 CANONICAL_GLOBS_IN_TEMPLATE = ("scripts/pipeline/*.py",)
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "+"}
+VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "+"}
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
 
@@ -1473,9 +1476,253 @@ def check_15_stale_screenshots(ctx: RepoContext) -> None:
                 f"（UI は {ui_date} に {ui_label} を変更）。同梱画像は購入者が README や "
                 f"Documentation~ で最初に見る説明なので、現行 UI と食い違うと実装ではなく画像のほうを"
                 f"信じます。画像は文言を grep しても出てこない唯一のサーフェスなので、UI を直しても"
-                f"取り残されます。開いて現行 UI と見比べ、違っていれば撮り直してください"
+                f"取り残されます。開いて現行 UI と見比べ、違っていれば撮り直してください。"
+                f"**同じ構図のコピーは商品ページ（external-content/products/<slug>/assets/）と"
+                f"出品プラットフォームにもあり、そちらはこの検査の対象外です**。3 面まとめて見直してください"
                 f"（GOLD_STANDARD §2.5・§2.10）",
                 rel,
+            )
+
+
+# ---------------------------------------------------------------------------
+# 検査 16: 同梱物の変更が CHANGELOG に記録されていること
+#
+# `.tgz` に入るファイルは**そのまま購入者の手元へ届く**。実装だけでなく、README・詳細ガイド・
+# サンプル・エージェント向けガイド・テストコードのコメントまで、すべて購入者が読む面である。
+# ところが変更履歴は人手で書くので、「同梱物を足した／変えた」のに書き忘れても誰も気づかない。
+# 購入者は変更履歴以外に「何が変わったか」を知る手段を持たないため、書き忘れは
+# **出荷してから発覚し、遡って直せない**（過去の版の記録は書き換えない方針のため）。
+#
+# 実際に TAE の 2.0.0 直前の監査で、最新タグ 1.2.6 以降に足した同梱物のうち 5 件が
+# `[Unreleased]` に落ちていた。とくに `CLAUDE.md` / `AGENTS.md` は**新規同梱**なのに
+# 「手引きに追記した」としか読めない書き方で `ドキュメント` 節に入っており、購入者からは
+# 「もともと入っていたものを直した」と読めた（2026-08-02 検出）。
+#
+# 3 段構えで、断定できる度合いに応じて severity を分ける:
+#
+# 1. **error**: 同梱物が変わったのに記録先が丸ごと空。これは自然言語の判断を一切含まない
+#    構造的な事実（`[Unreleased]` にもタグ未作成の版の節にも 1 行も無い）なので、検査 14 と
+#    同じくリリースを止める。
+# 2. **warn**: 新規追加があるのに「追加 / Added」節が無い。節の名前は表記の規約なので
+#    （`New` などの言い換えもありうる）自然言語のヒューリスティックであり、§2.10 の方針どおり
+#    warn に留める。
+# 3. **warn**: **購入者が同梱物そのものとして受け取るファイル**（パッケージ直下の `.md`・
+#    `Documentation~/`・`Samples~/`）を新規追加したのに、その名前が「追加 / Added」節の本文に
+#    出てこない。上の TAE の事故はここで鳴る。`Editor/` / `Runtime/` のソースは「挙動」として
+#    書かれるものでファイル名を求めるのは筋違いなので対象にしない。
+#
+# **「tgz に入るパス」の判定根拠**: 1.2.6 の実物 3 本（base / curve / gradient）と、EPE 2.0.1 の
+# 実物を、それぞれ同じタグ時点の `git ls-tree` と突き合わせて確認した。中身は
+# **`Packages/<name>/` 配下の git 追跡ファイル全部と完全一致**で、`.meta` も `Tests/` も
+# `Samples~` も `Documentation~` も入る。したがって除外するのは npm / `Client.Pack` が
+# 既定で落とす OS・VCS 由来のファイルだけでよい（現状どのリポジトリにも 1 件も無い）。
+#
+# **タグが無いリポジトリは検査しない**。比較の起点が無く、「最初のリリースまでの全部」を
+# 記録漏れとして鳴らしても新規リポジトリを騒がせるだけで意味がない。浅い clone でタグが
+# 取れない場合も同じく黙る（検査 15 と同じ「git という証拠が無いときは何も主張しない」）。
+#
+# **CHANGELOG.md が無いパッケージも検査しない**。その不備は check_extra が warn で言うので、
+# ここで重ねて鳴らすと同じ話が 2 度出るだけになる。
+#
+# **記録先は `[Unreleased]` だけではない**。リリース工程は「検査 → CHANGELOG 畳み込み →
+# 成果物 → コミット → タグ」の順で進むため、畳み込んだ直後・タグを打つ前には `[Unreleased]` が
+# 空になる。この窓で誤って error を出さないよう、**まだタグの無い版の節**も記録先として数える。
+# ---------------------------------------------------------------------------
+
+# npm / Client.Pack が既定で tarball から落とす OS・VCS 由来の名前（パス区切りごとに照合する）。
+# ここに載らないものは `.meta` も隠しフォルダも含めてすべて同梱物として扱う。
+NON_BUNDLED_NAME_PATTERNS = (
+    ".git*", ".hg", ".svn", "CVS", "node_modules", ".DS_Store", "._*",
+    "*.orig", "*.swp", "*.swo", ".npmrc", ".npmignore", "npm-debug.log", "package-lock.json",
+)
+
+CHANGELOG_VERSION_RE = re.compile(r"^##\s+\[?([^\]\s]+)\]?")
+CHANGELOG_SECTION_RE = re.compile(r"^###\s+(.+?)\s*$")
+# 「追加」節の見出し。日英どちらの表記でも受ける（併記の CHANGELOG では両方が現れる）
+ADDED_SECTION_RE = re.compile(r"^(追加|added)\b", re.IGNORECASE)
+# 購入者が「同梱物そのもの」として受け取る直下フォルダ
+BUNDLED_ARTIFACT_DIRS = ("Documentation~", "Samples~")
+
+
+@dataclass
+class ChangelogSection:
+    """CHANGELOG の版ごとの節（`## [x.y.z]` 単位）。"""
+
+    label: str
+    body: list[str] = field(default_factory=list)
+    added_body: list[str] = field(default_factory=list)
+
+
+def parse_changelog(text: str) -> list[ChangelogSection]:
+    sections: list[ChangelogSection] = []
+    current: ChangelogSection | None = None
+    subsection: str | None = None
+    for line in text.splitlines():
+        version = CHANGELOG_VERSION_RE.match(line)
+        if version:
+            current = ChangelogSection(version.group(1))
+            subsection = None
+            sections.append(current)
+            continue
+        if current is None:
+            continue
+        current.body.append(line)
+        heading = CHANGELOG_SECTION_RE.match(line)
+        if heading:
+            subsection = heading.group(1)
+            continue
+        if subsection and ADDED_SECTION_RE.match(subsection):
+            current.added_body.append(line)
+    return sections
+
+
+def _tag_exists(version: str, tags: set[str], policy: str | None) -> bool:
+    """version に対応するタグが既にあるか。`tagPolicy` があればそれに従う。"""
+    if policy == "bare":
+        return version in tags
+    if policy == "v-prefix":
+        return f"v{version}" in tags
+    return bool({version, f"v{version}"} & tags)  # 宣言が無ければどちらの命名でも既出とみなす
+
+
+def changelog_sinks(
+    sections: list[ChangelogSection], package_version: str, tags: set[str], policy: str | None
+) -> list[ChangelogSection]:
+    """「最新タグ以降の変更を書く先」になりうる節を返す。
+
+    `[Unreleased]` に加え、**まだタグの無い版の節**（畳み込み済み・タグ未作成）を含める。
+    """
+    sinks = []
+    for section in sections:
+        if section.label.lower() == "unreleased":
+            sinks.append(section)
+        elif package_version and section.label == package_version and not _tag_exists(package_version, tags, policy):
+            sinks.append(section)
+    return sinks
+
+
+def is_bundled_path(rel_in_package: str) -> bool:
+    """パッケージルート相対のパスが `.tgz` に入るか。"""
+    return not any(
+        fnmatch.fnmatch(segment, pattern)
+        for segment in rel_in_package.split("/")
+        for pattern in NON_BUNDLED_NAME_PATTERNS
+    )
+
+
+def bundled_artifact_token(rel_in_package: str) -> str | None:
+    """「新規追加そのものが変更履歴の主語になる同梱物」なら、記録に現れるべき語を返す。
+
+    `Documentation~/` と `Samples~/` は 1 回の追加で何十ファイルにもなるためフォルダ名へ畳む。
+    """
+    if rel_in_package.endswith(".meta"):
+        return None  # `.meta` は同梱物だが変更履歴の主語にはならない（本体と対で動く）
+    head = rel_in_package.split("/")[0]
+    if head in BUNDLED_ARTIFACT_DIRS:
+        return head
+    if "/" in rel_in_package or not rel_in_package.lower().endswith(".md"):
+        return None  # 実装ソースは「挙動」として書かれるのでファイル名は求めない
+    if rel_in_package == "CHANGELOG.md":
+        return None  # 自分自身の追加は自分に書けない
+    return rel_in_package
+
+
+def _latest_tag(root: Path) -> str | None:
+    """HEAD から辿れる直近のタグ。無い・git が読めない場合は None。"""
+    tag = run_git(root, "describe", "--tags", "--abbrev=0").strip()
+    if not tag or not run_git(root, "log", "--format=%H", "-1", tag).strip():
+        return None
+    return tag
+
+
+def check_16_changelog_coverage(ctx: RepoContext) -> None:
+    if not ctx.packages:
+        return
+    tag = _latest_tag(ctx.root)
+    if tag is None:
+        return  # 比較の起点が無い（初回リリース前・浅い clone）
+    tags = set(run_git(ctx.root, "tag", "--list").split())
+    policy = ctx.config.get("tagPolicy")
+
+    for name, package_dir, meta in ctx.packages:
+        package_rel = package_dir.relative_to(ctx.root).as_posix()
+        changelog = package_dir / "CHANGELOG.md"
+        if not changelog.is_file():
+            continue  # 不在は check_extra が warn で言う
+        changelog_rel = f"{package_rel}/CHANGELOG.md"
+        if ctx.is_waived("16", changelog_rel):
+            continue
+        try:
+            text = changelog.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        # タグ → 作業ツリーの差分。未追跡ファイルは検査 6 が error で拾うのでここでは見ない
+        changed: list[str] = []
+        added: list[str] = []
+        for line in run_git(ctx.root, "diff", "--name-status", "-M", tag, "--", package_rel).splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            status, path = parts[0], parts[-1]
+            if not path.startswith(f"{package_rel}/"):
+                continue
+            rel_in_package = path[len(package_rel) + 1 :]
+            if not is_bundled_path(rel_in_package):
+                continue
+            if rel_in_package in ("CHANGELOG.md", "CHANGELOG.md.meta"):
+                continue  # 記録そのものの変更に記録を要求すると循環する
+            changed.append(rel_in_package)
+            if status.startswith("A"):
+                added.append(rel_in_package)
+        if not changed:
+            continue
+
+        sinks = changelog_sinks(parse_changelog(text), str(meta.get("version") or ""), tags, policy)
+        recorded = "\n".join(line for sink in sinks for line in sink.body).strip()
+        added_text = "\n".join(line for sink in sinks for line in sink.added_body).strip()
+
+        if not recorded:
+            ctx.add(
+                "16",
+                ERROR,
+                f"{name}: 最新タグ {tag} 以降に同梱物が {len(changed)} 件変わっていますが、CHANGELOG に"
+                f"記録がありません（`[Unreleased]` もタグ未作成の版の節も空）。`.tgz` に入るファイルは"
+                f"そのまま購入者の手元へ届き、購入者は変更履歴以外に何が変わったかを知る手段を持ちません。"
+                f"過去の版の記録は後から書き換えない方針なので、書き忘れたまま出荷すると取り返せません"
+                f"（GOLD_STANDARD §2.5・§2.10）",
+                changelog_rel,
+            )
+            continue
+
+        if added and not added_text:
+            ctx.add(
+                "16",
+                WARN,
+                f"{name}: 同梱物に {len(added)} 件のファイルが新規追加されていますが、CHANGELOG の記録に"
+                f"「追加」/「Added」の節がありません。既存の変更と新規同梱は購入者にとって別の出来事なので、"
+                f"追加は追加として立ててください（GOLD_STANDARD §2.5・§2.10）",
+                changelog_rel,
+            )
+            continue  # 節ごと無いなら、下の名指し検査は同じ話を繰り返すだけ
+
+        lowered = added_text.lower()
+        for token in sorted({t for t in (bundled_artifact_token(a) for a in added) if t}):
+            if token.lower() in lowered:
+                continue
+            target = f"{package_rel}/{token}"
+            if ctx.is_waived("16", target):
+                continue
+            ctx.add(
+                "16",
+                WARN,
+                f"{name}: `{token}` を新規に同梱しましたが、CHANGELOG の「追加」/「Added」節が"
+                f"この名前に触れていません。既存ファイルの更新と新規同梱は購入者にとって別の出来事で、"
+                f"更新としか読めない書き方だと「もともと入っていたもの」と受け取られます"
+                f"（TAE で `CLAUDE.md` / `AGENTS.md` の新規同梱が「手引きに追記した」としか読めない形で"
+                f"別の節に入っていた。2026-08-02 検出）。「追加」節へ新規同梱として明記してください"
+                f"（GOLD_STANDARD §2.5・§2.10）",
+                target,
             )
 
 
@@ -1591,6 +1838,7 @@ CHECKS = (
     check_13_suite_versions,
     check_14_bundled_contents,
     check_15_stale_screenshots,
+    check_16_changelog_coverage,
     check_extra,
 )
 

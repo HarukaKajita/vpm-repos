@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: de84f8428b8d4d87bce277c9fbc4770e9aaa2e3c3ae90d3ab17bf0d8f6010a3e
+# source-sha256: 717cc74ad314d8c744fc5468b06e731abb6874a9c2dc4ebc7b991eccd5fac68e
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -116,7 +116,7 @@ CANONICAL_IN_TEMPLATE = ("docs/GOLD_STANDARD.md",)
 CANONICAL_GLOBS_IN_TEMPLATE = ("scripts/pipeline/*.py",)
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "+"}
+VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "+"}
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
 
@@ -355,6 +355,21 @@ def check_00_config(ctx: RepoContext) -> None:
                 ctx.add("+", ERROR, f"{label} の expiresAt は YYYY-MM-DD 形式で書いてください: {expires}")
             elif today and str(expires) < today:
                 ctx.add("+", ERROR, f"{label} は {expires} に期限切れです: {waiver.get('target')}")
+
+    # 法文だけ言語を絞る方針を採るときの宣言。宣言があれば検査 17 が error で厳密に照合し、
+    # 無ければ warn に留める。空配列を許すと「全部消す」宣言と「書き忘れ」が区別できない
+    license_langs = ctx.config.get("licensePageLanguages")
+    if license_langs is not None and (
+        not isinstance(license_langs, list)
+        or not license_langs
+        or not all(isinstance(item, str) and item.strip() for item in license_langs)
+    ):
+        ctx.add(
+            "+",
+            ERROR,
+            "pipeline/repo.json の licensePageLanguages は空でない文字列の配列である必要があります"
+            "（例: [\"ja\", \"en\"]）",
+        )
 
     if ctx.is_product:
         for key in ("productSlug", "saleUnit"):
@@ -1726,6 +1741,270 @@ def check_16_changelog_coverage(ctx: RepoContext) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# 検査 17: ライセンス本文の面間整合と、保証範囲の主張の一致
+#
+# 自作 EULA の本文は 1 か所では完結せず、少なくとも 5 つの面へ同時に散る:
+#   (1) サイトの正本 `external-content/products/<slug>/licenses/eula.md`
+#   (2) パッケージ同梱の `LICENSE.md`（`.tgz` に入り購入者の手元へ届く）
+#   (3) ライセンス掲示ページ `pages/licenses/<lang>.mdx`
+#   (4) 出品プラットフォームの説明文（`descriptions/*.md` / `publish.json`）
+#   (5) CHANGELOG（購入者が「権利義務が変わった」と知る唯一の経路）
+# 片面だけ直すと購入者の手元と正本が食い違う。実際に EPE で、`LICENSE.md` の全面差し替え
+# （4 行の英文 → 108 行の EULA。購入者の権利義務が変わる）が CHANGELOG に 1 行も無いまま
+# リリース直前まで進んだ（2026-08-02 検出）。検査 16 は同梱物の変更一般を warn で拾うが、
+# **ライセンスは購入者の権利義務そのもの**なので、この検査で error へ格上げする。
+#
+# さらに、EULA 第 10 条で保証範囲を「購入の時点で商品ページに明示した機能および対応環境の範囲」に
+# 紐づけた（2026-08-06 確定）ことで、**商品ページの対応環境の記載が契約の内容になった**。
+# `package.json` の `unity` と説明文の対応環境が食い違うと、そのまま契約不適合になる。
+# これは EULA の文言変更が生んだ新しい義務であり、人間の注意力に任せてよい種類のものではない。
+#
+# サイトリポジトリが解決できない環境（他人の clone・CI の最小構成）では黙る。
+# 検査 10・12 と同じ流儀で、「証拠が無いときは何も主張しない」。
+# ---------------------------------------------------------------------------
+
+# CHANGELOG がライセンスの変更に触れているとみなす語。日英どちらの表記でも拾う
+LICENSE_MENTION_TOKENS = ("license", "licence", "ライセンス", "使用許諾", "eula", "規約")
+
+
+def normalize_license_text(text: str) -> str:
+    """ライセンス本文を比較用に正規化する（コードフェンス除去＋空白畳み）。
+
+    サイト側の正本は**掲示ページ**なので、同梱物とバイト一致とは限らない。実測で 3 通りある:
+      - 完全一致（EPE: `eula.md` がそのまま `LICENSE.md`）
+      - 掲示用の前置きを添え、本文を ```text フェンスで包む（UEL: `mit.md` が素の MIT を包む）
+      - 同一商品内でパッケージごとに前文だけ差し替える（UMPD の companion パッケージ）
+    最初の 2 つは「同梱物の本文が正本に含まれる」で等しく通り、3 つ目だけが外れる。
+    バイト一致を全体の規約にすると、正当な掲示の作り方まで落としてしまう。
+    """
+    without_fence = re.sub(r"^\s*```[^\n]*$", "", text, flags=re.MULTILINE)
+    return re.sub(r"\s+", " ", without_fence).strip()
+
+
+def _site_product_dir(ctx: RepoContext) -> Path | None:
+    """サイトリポジトリ側の商品ディレクトリ。解決できなければ None。"""
+    slug = str(ctx.config.get("productSlug") or "").strip()
+    if not slug:
+        return None
+    site_root = resolve_site_repo(ctx)
+    if site_root is None:
+        return None
+    product_dir = site_root / "external-content" / "products" / slug
+    return product_dir if product_dir.is_dir() else None
+
+
+def _license_page_langs(product_dir: Path) -> set[str] | None:
+    """`pages/licenses/` にある言語タグの集合。ディレクトリが無ければ None。"""
+    pages_dir = product_dir / "pages" / "licenses"
+    if not pages_dir.is_dir():
+        return None
+    return {path.stem for path in pages_dir.glob("*.mdx")}
+
+
+def check_17_license_surfaces(ctx: RepoContext) -> None:
+    if not ctx.packages:
+        return
+    product_dir = _site_product_dir(ctx)
+    if product_dir is None:
+        return
+
+    publish = load_json(product_dir / "publish.json") or {}
+    core = publish.get("core") if isinstance(publish.get("core"), dict) else {}
+    license_decl = core.get("license") if isinstance(core.get("license"), dict) else {}
+    is_self_license = str(license_decl.get("source") or "") == "self"
+
+    # --- 17-a: 正本の実在と、同梱 LICENSE.md の本文が正本に含まれること -----
+    canonical_norm: str | None = None
+    if is_self_license:
+        ref = str(license_decl.get("ref") or "").strip()
+        if not ref:
+            ctx.add("17", ERROR, "publish.json の core.license.source が self ですが ref がありません")
+        else:
+            canonical = product_dir / ref
+            if not canonical.is_file():
+                ctx.add("17", ERROR, f"publish.json の core.license.ref が指す正本がサイト側にありません: {ref}")
+            else:
+                canonical_norm = normalize_license_text(canonical.read_text(encoding="utf-8", errors="ignore"))
+
+    if canonical_norm is not None:
+        primary = str((ctx.config.get("saleUnit") or {}).get("primaryPackage") or "")
+        for name, package_dir, _ in ctx.packages:
+            package_rel = package_dir.relative_to(ctx.root).as_posix()
+            bundled = package_dir / "LICENSE.md"
+            target = f"{package_rel}/LICENSE.md"
+            if ctx.is_waived("17", target) or not bundled.is_file():
+                continue  # 不在は check_extra が warn で言う
+            if normalize_license_text(bundled.read_text(encoding="utf-8", errors="ignore")) in canonical_norm:
+                continue
+            if name == primary:
+                ctx.add(
+                    "17",
+                    ERROR,
+                    f"{name}: 同梱 LICENSE.md の本文が、サイトの正本（{ref}）に含まれていません。"
+                    f"`.tgz` に入るファイルなので、そのまま購入者の手元へ届きます。"
+                    f"販売単位の主パッケージの契約書は、掲示している正本と食い違ってはいけません。"
+                    f"どちらが新しいかを確かめ、正本を決めてから両方を揃えてください"
+                    f"（GOLD_STANDARD §2.5・§2.10）",
+                    target,
+                )
+            else:
+                ctx.add(
+                    "17",
+                    WARN,
+                    f"{name}: 同梱 LICENSE.md の本文が、サイトの正本（{ref}）に含まれていません。"
+                    f"従属パッケージが前文だけ差し替えた版を同梱することは正当ですが、"
+                    f"**その版はサイトのどこにも掲示されていない**状態になります。"
+                    f"購入者が手元の契約書を第三者へ示せる URL が無いことになるので、"
+                    f"掲示するか、正本の本文へ収めるかを決めてください",
+                    target,
+                )
+
+    # --- 17-b: ライセンス掲示ページの言語セット -----------------------------
+    page_langs = _license_page_langs(product_dir)
+    if page_langs is not None:
+        declared = ctx.config.get("licensePageLanguages")
+        if isinstance(declared, list) and declared:
+            expected = {str(item) for item in declared}
+            if page_langs != expected:
+                missing = sorted(expected - page_langs)
+                extra = sorted(page_langs - expected)
+                detail = "・".join(
+                    part
+                    for part in (
+                        f"不足: {', '.join(missing)}" if missing else "",
+                        f"余分: {', '.join(extra)}" if extra else "",
+                    )
+                    if part
+                )
+                ctx.add(
+                    "17",
+                    ERROR,
+                    f"pages/licenses/ の言語セットが pipeline/repo.json の licensePageLanguages の宣言と"
+                    f"一致しません（{detail}）。法文だけ言語を絞る方針を採るなら、宣言と実体を必ず揃えて"
+                    f"ください。削り忘れた版が残ると、正本と違う内容の契約書が読める状態になります",
+                )
+        else:
+            meta_langs = load_json(product_dir / "meta.json") or {}
+            site_langs = {str(item) for item in (meta_langs.get("langs") or [])}
+            if site_langs and page_langs != site_langs:
+                ctx.add(
+                    "17",
+                    WARN,
+                    f"pages/licenses/ の言語セット（{len(page_langs)} 言語）が meta.json の langs"
+                    f"（{len(site_langs)} 言語）と一致しません。法文だけ言語を絞るのは正当な方針ですが、"
+                    f"意図した絞り込みなら pipeline/repo.json に licensePageLanguages を宣言してください"
+                    f"（宣言があれば error で厳密に照合します。無いと削り忘れと区別できません）",
+                )
+
+    # --- 17-c: LICENSE.md の変更が CHANGELOG に記録されているか -------------
+    if is_self_license:
+        _check_license_changelog(ctx)
+        _check_license_comovement(ctx)
+
+    # --- 17-d: 対応環境の主張が package.json と一致するか -------------------
+    requirements = ""
+    description_input = publish.get("descriptionInput")
+    if isinstance(description_input, dict):
+        requirements = str(description_input.get("requirements") or "")
+    if requirements:
+        for name, package_dir, meta in ctx.packages:
+            rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
+            unity = str(meta.get("unity") or "").strip()
+            if not unity or ctx.is_waived("17", rel):
+                continue
+            if unity in requirements:
+                continue
+            ctx.add(
+                "17",
+                ERROR,
+                f"{name}: package.json の unity `{unity}` が、商品ページの対応環境の記載"
+                f"（publish.json の descriptionInput.requirements: 「{requirements}」）に現れません。"
+                f"EULA 第 10 条で保証範囲を「購入の時点で商品ページに明示した機能および対応環境の範囲」に"
+                f"紐づけたため、**この記載は契約の内容そのもの**です。食い違いはそのまま契約不適合になります",
+                rel,
+            )
+
+
+def _check_license_comovement(ctx: RepoContext) -> None:
+    """複数パッケージの販売単位で、同梱 LICENSE.md が一部だけ更新されていないか。
+
+    1 商品 = 1 ライセンスなので、同梱の契約書は必ず揃って動く。片方だけ直すと、
+    **同じ商品を買った購入者が、どのパッケージを見るかで違う契約書を読む**ことになる。
+    前文だけ差し替えた版を持つ従属パッケージ（UMPD の companion）でも、条件の本体は共通なので
+    「片方だけ動く」は常に間違い。バイト一致を求めない代わりに、動きが揃うことをここで担保する。
+    """
+    if len(ctx.packages) < 2:
+        return
+    tag = _latest_tag(ctx.root)
+    if tag is None:
+        return  # 比較の起点が無い（初回リリース前・浅い clone）
+
+    changed: list[str] = []
+    unchanged: list[str] = []
+    for name, package_dir, _ in ctx.packages:
+        package_rel = package_dir.relative_to(ctx.root).as_posix()
+        license_rel = f"{package_rel}/LICENSE.md"
+        if not (package_dir / "LICENSE.md").is_file() or ctx.is_waived("17", license_rel):
+            continue
+        if run_git(ctx.root, "diff", "--name-only", tag, "--", license_rel).strip():
+            changed.append(name)
+        else:
+            unchanged.append(name)
+
+    if changed and unchanged:
+        ctx.add(
+            "17",
+            ERROR,
+            f"最新タグ {tag} 以降、同梱 LICENSE.md が一部のパッケージだけ変わっています"
+            f"（変わった: {', '.join(sorted(changed))} / 変わっていない: {', '.join(sorted(unchanged))}）。"
+            f"1 商品 = 1 ライセンスなので、同梱の契約書は必ず揃って動きます。"
+            f"このまま出荷すると、同じ商品を買った購入者が、どのパッケージを見るかで違う契約書を読みます",
+        )
+
+
+def _check_license_changelog(ctx: RepoContext) -> None:
+    """最新タグ以降に LICENSE.md が変わっているのに、CHANGELOG がそれに触れていない場合に落とす。"""
+    tag = _latest_tag(ctx.root)
+    if tag is None:
+        return  # 比較の起点が無い（初回リリース前・浅い clone）
+    tags = set(run_git(ctx.root, "tag", "--list").split())
+    policy = ctx.config.get("tagPolicy")
+
+    for name, package_dir, meta in ctx.packages:
+        package_rel = package_dir.relative_to(ctx.root).as_posix()
+        license_rel = f"{package_rel}/LICENSE.md"
+        if ctx.is_waived("17", license_rel):
+            continue
+        if not run_git(ctx.root, "diff", "--name-only", tag, "--", license_rel).strip():
+            continue  # 変わっていない
+
+        changelog = package_dir / "CHANGELOG.md"
+        if not changelog.is_file():
+            continue  # 不在は check_extra が warn で言う
+        try:
+            text = changelog.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        sinks = changelog_sinks(parse_changelog(text), str(meta.get("version") or ""), tags, policy)
+        recorded = "\n".join(line for sink in sinks for line in sink.body).lower()
+        if any(token in recorded for token in LICENSE_MENTION_TOKENS):
+            continue
+
+        ctx.add(
+            "17",
+            ERROR,
+            f"{name}: 最新タグ {tag} 以降に LICENSE.md が変わっていますが、CHANGELOG がライセンスに"
+            f"触れていません。ライセンスの変更は**購入者の権利義務そのものの変更**であり、同梱物の"
+            f"更新一般（検査 16）より重い出来事です。購入者は変更履歴以外にそれを知る手段を持たず、"
+            f"過去の版の記録は後から書き換えない方針なので、書き忘れたまま出荷すると取り返せません"
+            f"（EPE で 4 行の英文から 108 行の EULA への全面差し替えが記録されないままリリース直前まで"
+            f"進んだ。2026-08-02 検出。GOLD_STANDARD §2.5・§2.10）",
+            f"{package_rel}/CHANGELOG.md",
+        )
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -1750,6 +2029,12 @@ def load_personal_config() -> dict:
 def resolve_site_repo(ctx: RepoContext) -> Path | None:
     personal = load_personal_config()
     candidates: list[str] = []
+    # 環境変数を最優先にする。CI では個人設定ファイルが無く、`~/dev/MySite` も存在しないため、
+    # チェックアウト先を明示できないと横断検査（10・12・17）が丸ごと黙ってしまう。
+    # `PIPELINE_TODAY` と同じ流儀で、環境から与えられた事実を推測より優先する
+    env_override = os.environ.get("PIPELINE_SITE_REPO")
+    if env_override:
+        candidates.append(env_override)
     override = (personal.get("overrides") or {}).get("mysite")
     if override:
         candidates.append(override)
@@ -1839,6 +2124,7 @@ CHECKS = (
     check_14_bundled_contents,
     check_15_stale_screenshots,
     check_16_changelog_coverage,
+    check_17_license_surfaces,
     check_extra,
 )
 

@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 717cc74ad314d8c744fc5468b06e731abb6874a9c2dc4ebc7b991eccd5fac68e
+# source-sha256: e325d2c95c5758e497f679c678ad649c04a01efd4e23435ab33240261287e418
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -1853,10 +1853,11 @@ def check_17_license_surfaces(ctx: RepoContext) -> None:
                     "17",
                     WARN,
                     f"{name}: 同梱 LICENSE.md の本文が、サイトの正本（{ref}）に含まれていません。"
-                    f"従属パッケージが前文だけ差し替えた版を同梱することは正当ですが、"
-                    f"**その版はサイトのどこにも掲示されていない**状態になります。"
-                    f"購入者が手元の契約書を第三者へ示せる URL が無いことになるので、"
-                    f"掲示するか、正本の本文へ収めるかを決めてください",
+                    f"**その版はサイトのどこにも掲示されていない**状態であり、購入者が手元の契約書を"
+                    f"第三者へ示せる URL がありません。スイートは全パッケージへ**バイト同一**のものを"
+                    f"同梱する規約（GOLD_STANDARD §2.10 検査 17）なので、主パッケージ側も同じ状態か、"
+                    f"この従属パッケージだけが独自版を持っているかのどちらかです。"
+                    f"後者なら差し替え版を廃し、主パッケージと同一のものへ揃えてください",
                     target,
                 )
 
@@ -1900,7 +1901,7 @@ def check_17_license_surfaces(ctx: RepoContext) -> None:
     # --- 17-c: LICENSE.md の変更が CHANGELOG に記録されているか -------------
     if is_self_license:
         _check_license_changelog(ctx)
-        _check_license_comovement(ctx)
+        _check_license_identical_in_suite(ctx)
 
     # --- 17-d: 対応環境の主張が package.json と一致するか -------------------
     requirements = ""
@@ -1926,41 +1927,47 @@ def check_17_license_surfaces(ctx: RepoContext) -> None:
             )
 
 
-def _check_license_comovement(ctx: RepoContext) -> None:
-    """複数パッケージの販売単位で、同梱 LICENSE.md が一部だけ更新されていないか。
+def _check_license_identical_in_suite(ctx: RepoContext) -> None:
+    """スイート内の全パッケージの同梱 LICENSE.md がバイト同一か（GOLD_STANDARD §2.10・D24）。
 
-    1 商品 = 1 ライセンスなので、同梱の契約書は必ず揃って動く。片方だけ直すと、
-    **同じ商品を買った購入者が、どのパッケージを見るかで違う契約書を読む**ことになる。
-    前文だけ差し替えた版を持つ従属パッケージ（UMPD の companion）でも、条件の本体は共通なので
-    「片方だけ動く」は常に間違い。バイト一致を求めない代わりに、動きが揃うことをここで担保する。
+    **1 商品 = 1 ライセンス**なので、同じ商品のどのパッケージを見ても同じ契約書でなければならない。
+    パッケージごとに前文を差し替えた版は作らない。差し替え版は**サイトのどこにも掲示されていない
+    契約書**を生み、購入者が手元の契約書を第三者へ示せる URL が無くなる
+    （UMPD の companion が実際にその状態だった。2026-08-06 検出）。
+    「どのパッケージの契約書か」の書き分けは、契約書の側ではなく**規約本体の定義**で解く。
+
+    当初は「最新タグ以降に一部のパッケージだけ変わっていないか」（co-movement）で測っていたが、
+    2 つの穴があった:
+      - **既に食い違っている状態を検出できない**。どちらも変わっていなければ黙る（UMPD がまさにこれ）。
+      - **収束方向の片側変更を誤検出する**。差し替え版を正へ揃える修正は「片方だけ変わった」に見える。
+    バイト同一で測ればどちらも起きず、判定が「今どうなっているか」だけで決まる。
     """
     if len(ctx.packages) < 2:
         return
-    tag = _latest_tag(ctx.root)
-    if tag is None:
-        return  # 比較の起点が無い（初回リリース前・浅い clone）
 
-    changed: list[str] = []
-    unchanged: list[str] = []
+    digests: dict[str, list[str]] = {}
     for name, package_dir, _ in ctx.packages:
         package_rel = package_dir.relative_to(ctx.root).as_posix()
-        license_rel = f"{package_rel}/LICENSE.md"
-        if not (package_dir / "LICENSE.md").is_file() or ctx.is_waived("17", license_rel):
-            continue
-        if run_git(ctx.root, "diff", "--name-only", tag, "--", license_rel).strip():
-            changed.append(name)
-        else:
-            unchanged.append(name)
+        license_path = package_dir / "LICENSE.md"
+        if not license_path.is_file() or ctx.is_waived("17", f"{package_rel}/LICENSE.md"):
+            continue  # 不在は check_extra が warn で言う
+        digests.setdefault(hashlib.sha256(license_path.read_bytes()).hexdigest(), []).append(name)
 
-    if changed and unchanged:
-        ctx.add(
-            "17",
-            ERROR,
-            f"最新タグ {tag} 以降、同梱 LICENSE.md が一部のパッケージだけ変わっています"
-            f"（変わった: {', '.join(sorted(changed))} / 変わっていない: {', '.join(sorted(unchanged))}）。"
-            f"1 商品 = 1 ライセンスなので、同梱の契約書は必ず揃って動きます。"
-            f"このまま出荷すると、同じ商品を買った購入者が、どのパッケージを見るかで違う契約書を読みます",
-        )
+    if len(digests) < 2:
+        return
+
+    groups = "／".join(
+        f"[{', '.join(sorted(names))}]" for _, names in sorted(digests.items(), key=lambda kv: sorted(kv[1]))
+    )
+    ctx.add(
+        "17",
+        ERROR,
+        f"販売単位の中で同梱 LICENSE.md の内容が揃っていません（{len(digests)} 種類: {groups}）。"
+        f"**1 商品 = 1 ライセンス**なので、同じ商品を買った購入者が、どのパッケージを見るかで"
+        f"違う契約書を読む状態になります。パッケージごとに前文を差し替えた版は作らず、"
+        f"全パッケージへバイト同一のものを同梱してください。「どのパッケージの契約書か」の"
+        f"書き分けは、契約書ではなく**規約本体の定義**で解きます（GOLD_STANDARD §2.10 検査 17）",
+    )
 
 
 def _check_license_changelog(ctx: RepoContext) -> None:

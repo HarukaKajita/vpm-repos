@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: e325d2c95c5758e497f679c678ad649c04a01efd4e23435ab33240261287e418
+# source-sha256: 8d73f62c83b24a8f67447f64fce66ace4e66e9dc1057541315617aa432d72b63
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -1904,26 +1904,62 @@ def check_17_license_surfaces(ctx: RepoContext) -> None:
         _check_license_identical_in_suite(ctx)
 
     # --- 17-d: 対応環境の主張が package.json と一致するか -------------------
+    #
+    # 照合は `unity` だけでなく **`unity` + `unityRelease` を連結した版**で行う。
+    # `unity` だけで見ていた頃は「Unity 2022.3 以降」も「2022.3.0f1 以降」も
+    # 「2022.3 以降（最小要件 2022.3.0f1）」も等しく通り、**5 商品で書式が 3 通りに割れていても
+    # 検出できなかった**（2026-08-06 検出）。動作環境は法定の表示事項かつ契約の内容なので、
+    # 粒度のばらつきそのものが問題になる。
+    #
+    # 商品説明文（`descriptions/*.md`）も同じ版を名乗っているかを見る。
+    # 従来は `publish.json` の `requirements` しか照合しておらず、**販売プラットフォームへ実際に
+    # 投入される本文は誰とも突き合わされていなかった**（両者は別々に手書きされている）。
     requirements = ""
     description_input = publish.get("descriptionInput")
     if isinstance(description_input, dict):
         requirements = str(description_input.get("requirements") or "")
-    if requirements:
-        for name, package_dir, meta in ctx.packages:
-            rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
-            unity = str(meta.get("unity") or "").strip()
-            if not unity or ctx.is_waived("17", rel):
+
+    description_texts: list[tuple[str, str]] = []
+    for path in sorted((product_dir / "descriptions").glob("*.md")):
+        try:
+            description_texts.append((path.name, path.read_text(encoding="utf-8")))
+        except OSError:
+            continue
+
+    for name, package_dir, meta in ctx.packages:
+        rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
+        unity = str(meta.get("unity") or "").strip()
+        if not unity or ctx.is_waived("17", rel):
+            continue
+        release = str(meta.get("unityRelease") or "").strip()
+        wanted = f"{unity}.{release}" if release else unity
+
+        if requirements and wanted not in requirements:
+            ctx.add(
+                "17",
+                ERROR,
+                f"{name}: package.json の対応 Unity `{wanted}`（unity + unityRelease）が、"
+                f"publish.json の descriptionInput.requirements に現れません（現在の記載: 「{requirements}」）。"
+                f"EULA 第 10 条で保証範囲を「購入の時点で商品ページに明示した機能および対応環境の範囲」に"
+                f"紐づけたため、**この記載は契約の内容そのもの**です。"
+                f"`unity` だけの一致では書式のばらつき（「2022.3 以降」と「2022.3.0f1 以降」の混在）を"
+                f"止められないので、**連結した版で名乗る**こと",
+                rel,
+            )
+        for fname, text in description_texts:
+            if wanted in text:
                 continue
-            if unity in requirements:
+            target = f"descriptions/{fname}"
+            if ctx.is_waived("17", target):
                 continue
             ctx.add(
                 "17",
                 ERROR,
-                f"{name}: package.json の unity `{unity}` が、商品ページの対応環境の記載"
-                f"（publish.json の descriptionInput.requirements: 「{requirements}」）に現れません。"
-                f"EULA 第 10 条で保証範囲を「購入の時点で商品ページに明示した機能および対応環境の範囲」に"
-                f"紐づけたため、**この記載は契約の内容そのもの**です。食い違いはそのまま契約不適合になります",
-                rel,
+                f"{name}: 商品説明文 {fname} が対応 Unity `{wanted}` を名乗っていません。"
+                f"**この本文は販売プラットフォームへそのまま投入されます**。"
+                f"publish.json の requirements と descriptions は別々に手書きされるので、"
+                f"片方だけ直すと購入者が読む側が古いまま残ります",
+                target,
             )
 
 

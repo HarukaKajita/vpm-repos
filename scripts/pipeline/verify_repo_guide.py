@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 8d73f62c83b24a8f67447f64fce66ace4e66e9dc1057541315617aa432d72b63
+# source-sha256: e46f0a6682e9bc1c9ad16581e8d9cfccb3965f5b70a2325e9ec8333e9d4cd703
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -116,7 +116,18 @@ CANONICAL_IN_TEMPLATE = ("docs/GOLD_STANDARD.md",)
 CANONICAL_GLOBS_IN_TEMPLATE = ("scripts/pipeline/*.py",)
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-VALID_CHECK_IDS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "+"}
+# pipeline/repo.json のトップレベルに書いてよいキー。**閉じた集合**として扱い、これ以外は
+# 打ち間違いとみなして error にする（宣言が黙って無視されるのを防ぐ）。
+KNOWN_CONFIG_KEYS = frozenset({
+    "$schemaVersion", "repository", "role", "productSlug", "tagPolicy",
+    "saleUnit", "packagePolicies", "skillRefs", "skillSync", "waivers",
+    "licensePageLanguages", "prePush", "normativeDocs", "notes",
+})
+
+VALID_CHECK_IDS = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "+",
+}
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
 
@@ -326,6 +337,21 @@ def check_00_config(ctx: RepoContext) -> None:
         # 未知のスキーマで黙って通すと、検査していないのに通ったように見える
         ctx.add("+", ERROR, f"pipeline/repo.json の $schemaVersion が未対応です: {schema}（対応: {SUPPORTED_CONFIG_SCHEMA}）")
         return
+
+    # **未知のトップレベルキーは error。** repo.json は自前の閉じたスキーマなので、知らないキーは
+    # 常に打ち間違いである。ここを見ないと `prePush` を `prePish` と書いた瞬間に
+    # **宣言した pre-push の検査が 1 つも走らないまま push が通る**（hook は知らないキーを読まない）。
+    # 「宣言が黙って無効になる」形はこの検査体系でいちばん危ない失敗なので、器の名前から潰す。
+    unknown_keys = sorted(set(ctx.config) - KNOWN_CONFIG_KEYS)
+    if unknown_keys:
+        ctx.add(
+            "+",
+            ERROR,
+            f"pipeline/repo.json に未知のキーがあります: {', '.join(unknown_keys)}"
+            f"（打ち間違いなら直してください。宣言が黙って無視され、宣言したはずの検査が"
+            f"走らないまま通ってしまいます。キーを増やすときは verify_repo_guide.py の "
+            f"KNOWN_CONFIG_KEYS へも足すこと）",
+        )
 
     if ctx.role not in VALID_ROLES:
         ctx.add("+", ERROR, f"pipeline/repo.json の role が不正です: {ctx.role}（{'/'.join(sorted(VALID_ROLES))}）")
@@ -2048,6 +2074,623 @@ def _check_license_changelog(ctx: RepoContext) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# 検査 18: 翻訳カタログ（`*.l10n-manifest.json` + `Locales/*.json`）の整合
+#
+# 翻訳カタログは 5 つの Unity リポジトリ合計で 97 個の JSON に散っており、その整合は
+# UEL の C# 検証器 `EditorL10nValidator` が見ている。ただしそれは **Unity の Editor 上で
+# 人がメニュー（`Tools > ... > Validate Catalogs`）を押したときにしか動かない**。
+# batchmode 用の入口 `ValidateForCI()` は実装済みなのに、どのワークフローもそれを呼んでいない
+# （2026-08-09 時点で実測）。「検証器はあるが誰も実行しない」ので、壊れたまま出荷できてしまう。
+#
+# さらに **`Samples~` 配下のカタログは C# の検証器では構造的に永久に検査できない**。
+# Unity は `~` で終わるフォルダを import しないため、その中の manifest とテーブルは
+# `AssetDatabase` に載らず scope として登録されない。しかし `Samples~` は `.tgz` に入り
+# **そのまま購入者の手元へ届く**（検査 14・16 と同じ前提）。届いた先で Package Manager から
+# import されれば、欠けたキーはそのまま購入者の Unity で文言の欠落として出る。
+# だから Python 側では `Samples~` 配下も等しく対象にする（実例: UEL の
+# `Samples~/LocalizedEditorWindow/Editor/Localization/`）。
+#
+# 判定規則の**正本は C# 側**（`EditorL10nValidator.ValidateScope` / `ExtractPlaceholders` /
+# `FindMissingPlaceholderNumbers`）で、ここはその写しである。片方だけ直すと Editor 上の判定と
+# CI の判定が割れて「どちらが正しいのか分からない」状態になるので、規則を変えるときは
+# **必ず両方を同時に**直すこと。
+#
+# 指摘の出し方: 1 件 1 findings にすると 19 ロケール × 数百キーで出力が読めなくなるため、
+# (locale, 事象) 単位へ畳んで **件数を必ず本文に明示**し、代表例を数件添える。
+# 件数を隠さないので「握り潰し」にはならず、詳細は名指しされたテーブルを開けば分かる。
+#
+# C# に無い検査を 2 つだけ足している（孤児テーブル・git 未追跡テーブル）。どちらも
+# 「AssetDatabase を起点に manifest からしか辿らない C# 側では構造的に見えないが、
+# ファイルシステムと git 追跡状態を直接見られる Python 側なら塞げる」位置にあるものに限る。
+# ---------------------------------------------------------------------------
+
+# C# の `EditorL10nCatalog.IsManifestPath` と同じ判定にする。C# は「`.json` で終わり、
+# **ファイル名に `l10n-manifest` を含む**」で拾うので、`foo.l10n-manifest.json` だけでなく
+# `l10n-manifest-extra.json` のような名前も Unity 側では manifest として読まれる。
+# Python 側だけ接尾辞一致にしていると、Unity が読むのにここは見ない manifest が生まれる。
+L10N_MANIFEST_NAME_MARKER = "l10n-manifest"
+
+# C# の `EditorL10nValidator.PlaceholderRegex` と同じ意味。`{{0}}` のエスケープは拾わず、
+# `{0:N2}` のような書式指定付きは番号 0 として拾う。
+L10N_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{(\d+)(?:[^}]*)\}(?!\})")
+
+# 欠番列挙を打ち切る上限。C# は最大番号までそのままループするが、Python 側で同じことをすると
+# 壊れた入力（`{2000000000}` など）1 つで検査が止まる。実データの placeholder は 0〜数個なので、
+# この上限を超える時点で placeholder 集合が既定ロケールと一致するはずがなく、
+# 同じキーが必ず PlaceholderMismatch（error）で拾われる。取りこぼしにはならない。
+L10N_PLACEHOLDER_NUMBER_LIMIT = 1000
+
+
+def is_l10n_manifest_path(path: str) -> bool:
+    """C# の `EditorL10nCatalog.IsManifestPath` と同じ判定（`.json` 終わり＋ファイル名に marker を含む）。"""
+    if not path or not path.lower().endswith(".json"):
+        return False
+    return L10N_MANIFEST_NAME_MARKER in path.rsplit("/", 1)[-1]
+
+
+def normalize_locale_tag(locale: str) -> str:
+    """C# の `EditorL10n.NormalizeLocaleTag` と同じ正規化（`pt_br` → `pt-BR`、`ZH-hans` → `zh-Hans`）。"""
+    if not locale or not locale.strip():
+        return ""
+    parts = locale.strip().replace("_", "-").split("-")
+    for index, part in enumerate(parts):
+        if not part:
+            continue
+        if index == 0:
+            parts[index] = part.lower()
+        elif len(part) == 4 and part.isalpha():
+            parts[index] = part[0].upper() + part[1:].lower()
+        elif len(part) == 2 and part.isalpha():
+            parts[index] = part.upper()
+        else:
+            parts[index] = part.lower()
+    # C# は結合時に空要素を捨てる（`string.Join("-", parts.Where(part => !IsNullOrEmpty(part)))`）。
+    # 落とさないと `ja--JP` が `ja--JP`、`-ja` が `-ja` のまま残り、Unity 側が導く `ja-JP` / `ja` と
+    # 食い違って「Python では重複に見えないが Unity では同じタグ」という取りこぼしが生まれる。
+    return "-".join(part for part in parts if part)
+
+
+def _l10n_placeholder_number(placeholder: str) -> int:
+    """C# の `int.TryParse` と同じ判定（32bit に収まらない番号は -1＝解釈不能）。"""
+    try:
+        number = int(placeholder)
+    except ValueError:
+        return -1
+    return number if -2147483648 <= number <= 2147483647 else -1
+
+
+def extract_l10n_placeholders(text: str) -> set[str]:
+    """C# の `ExtractPlaceholders` と同じ規則で placeholder の番号文字列を集める。"""
+    if not text:
+        return set()
+    return {match.group(1) for match in L10N_PLACEHOLDER_RE.finditer(text)}
+
+
+def find_missing_placeholder_numbers(placeholders: set[str]) -> list[int]:
+    """C# の `FindMissingPlaceholderNumbers` と同じ規則で欠番（0 から最大番号まで）を返す。"""
+    numbers = sorted({n for n in (_l10n_placeholder_number(p) for p in placeholders) if n >= 0})
+    if not numbers or numbers[-1] > L10N_PLACEHOLDER_NUMBER_LIMIT:
+        return []
+    present = set(numbers)
+    return [number for number in range(numbers[-1] + 1) if number not in present]
+
+
+def _format_l10n_placeholders(placeholders: set[str]) -> str:
+    """C# の `FormatPlaceholders` と同じ並び（番号順・解釈不能なものは末尾）で一覧を作る。"""
+
+    def sort_key(placeholder: str) -> tuple[int, str]:
+        number = _l10n_placeholder_number(placeholder)
+        return (number if number >= 0 else 2147483647, placeholder)
+
+    return ",".join(sorted(placeholders, key=sort_key)) if placeholders else "（なし）"
+
+
+def _l10n_sample(items: list[str], limit: int = 6) -> str:
+    """指摘の代表例を列挙する（総件数は必ずメッセージ本文で別に示す）。"""
+    if len(items) <= limit:
+        return "、".join(items)
+    return "、".join(items[:limit]) + f" ほか {len(items) - limit} 件"
+
+
+def load_l10n_table(path: Path) -> dict[str, str] | None:
+    """翻訳テーブル JSON を key→value の辞書として読む。JSON として読めなければ None。
+
+    同じ key が重複していれば後勝ち（C# の `entries[key] = value` と同じ）。
+    """
+    data = load_json(path)
+    if data is None:
+        return None
+    entries: dict[str, str] = {}
+    for entry in data.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        key = entry.get("key")
+        if not isinstance(key, str) or not key:
+            continue  # C# も key が空の要素は読み飛ばす
+        value = entry.get("value")
+        entries[key] = value if isinstance(value, str) else ""
+    return entries
+
+
+def check_18_l10n_catalogs(ctx: RepoContext) -> None:
+    manifests = sorted(
+        rel
+        for rel in ctx.tracked
+        if rel.startswith("Packages/") and is_l10n_manifest_path(rel)
+    )
+    if not manifests:
+        return  # 翻訳カタログを持たないリポジトリ（サイト・技術同人誌など）では何も言わない
+    # 孤児テーブルの判定は**リポジトリ全体の登録済みパスを集めてから 1 回だけ**行う。
+    # manifest ごとに独立して判定すると、1 つの `Locales/` フォルダを 2 つの manifest が
+    # 分け合う構成（scope を分けた本体と拡張など）で、互いのテーブルを孤児として偽 warn する。
+    registered_rels: set[str] = set()
+    for manifest_rel in manifests:
+        registered_rels |= _check_l10n_manifest(ctx, manifest_rel)
+    _check_l10n_orphan_tables(ctx, registered_rels)
+
+
+def _check_l10n_manifest(ctx: RepoContext, manifest_rel: str) -> set[str]:
+    """1 つの manifest を検証し、**登録済み tablePath の集合**を返す（孤児判定は呼び出し元が行う）。"""
+    manifest_path = ctx.root / manifest_rel
+    if ctx.is_waived("18", manifest_rel):
+        return set()
+
+    document = load_json(manifest_path)
+    if document is None:
+        ctx.add(
+            "18",
+            ERROR,
+            "翻訳カタログの manifest が **この検査では** JSON として読めません（BOM 付き・"
+            "構文エラーなど）。Unity 側が同じように失敗するとは限らない（`TextAsset.text` は BOM を"
+            "落とすため C# 側は読める公算があり、そこは未検証）が、読めない JSON をそのまま出荷するのは"
+            "正しくないので error のままにしている。まず素の UTF-8（BOM 無し）の正しい JSON へ直すこと",
+            manifest_rel,
+        )
+        return set()
+
+    scope = str(document.get("scope") or "").strip()
+    if not scope:
+        ctx.add(
+            "18",
+            ERROR,
+            "翻訳カタログの manifest に scope がありません。Unity 側は scope の無い manifest を"
+            "黙って読み飛ばすため、テーブルを何枚置いても 1 つも読み込まれません",
+            manifest_rel,
+        )
+        return set()
+
+    default_locale = normalize_locale_tag(str(document.get("defaultLocale") or ""))
+    fixed_terms = {item for item in (document.get("fixedTerms") or []) if isinstance(item, str)}
+
+    # --- テーブルの読み込み（tablePath は manifest のあるディレクトリからの相対） -------
+    tables: dict[str, dict[str, str]] = {}
+    table_rels: dict[str, str] = {}
+    # manifest に登録済みの tablePath（読めたかどうかに関わらず記録する）。孤児テーブルの検出に使う。
+    registered_rels: set[str] = set()
+    # 正規化後のロケールタグ → その tablePath。重複検出に使う。
+    seen_tags: dict[str, str] = {}
+    for locale in document.get("locales") or []:
+        if not isinstance(locale, dict):
+            continue
+        tag = normalize_locale_tag(str(locale.get("tag") or ""))
+        table_path_value = str(locale.get("tablePath") or "").strip()
+        if not tag or not table_path_value:
+            continue  # C# も tag / tablePath が空の要素は読み飛ばす
+        table_path = manifest_path.parent / table_path_value
+        table_rel = os.path.relpath(table_path, ctx.root).replace(os.sep, "/")
+        # 重複で捨てる側も「manifest に登録済み」ではあるので、孤児テーブルとして二重に
+        # 鳴らさないよう、重複判定より先に登録済みとして記録する。
+        registered_rels.add(table_rel)
+        # 正規化後に同じタグへ潰れる項目が 2 つあると、C# の `AddLocale` は**先に読んだ方だけ**を
+        # 採用して 2 つめを黙って捨てる。捨てられたテーブルは誰にも表示されず、検証も受けない。
+        # Python 側で後勝ちの上書きにすると「先に読んだテーブルの不備が消える」ため、
+        # どちらの不備も隠れないよう重複そのものを error にする。
+        if tag in seen_tags:
+            ctx.add(
+                "18",
+                ERROR,
+                f"{scope}/{tag}: manifest に同じロケールタグの locales 項目が 2 つあります"
+                f"（tablePath: `{seen_tags[tag]}` と `{table_path_value}`）。タグは正規化してから"
+                f"比較されるため、表記が違っても同じタグへ潰れます。Unity 側は先に読んだ方だけを"
+                f"採用し 2 つめを黙って捨てるので、捨てられたテーブルは表示にも検証にも現れません。"
+                f"どちらを残すか決めて片方を削除してください",
+                manifest_rel,
+            )
+            continue
+        seen_tags[tag] = table_path_value
+        if ctx.is_waived("18", table_rel):
+            continue
+        if not table_path.is_file():
+            ctx.add(
+                "18",
+                ERROR,
+                f"{scope}/{tag}: manifest の tablePath が指す翻訳テーブルがありません"
+                f"（tablePath: {table_path_value}）。Unity 側はテーブルを空として読み込むため、"
+                f"そのロケールを選んだ利用者には**全キーが既定ロケールのまま**表示されます",
+                manifest_rel,
+            )
+            continue
+        # git 未追跡のテーブルは内容が完全でも配布物（`.tgz` / `.unitypackage`）に入らない。
+        # 手元の Unity では正しく見えるので、出荷して初めて壊れていることが分かる型の不備になる。
+        if table_rel not in ctx.tracked:
+            ctx.add(
+                "18",
+                WARN,
+                f"{scope}/{tag}: 翻訳テーブルが git 未追跡です。手元の Unity では読めるため気付き"
+                f"にくいですが、配布物に入らないため購入者の環境ではそのロケールを選んでも"
+                f"**全キーが既定ロケールのまま**表示されます。`git add` してください",
+                table_rel,
+            )
+        entries = load_l10n_table(table_path)
+        if entries is None:
+            ctx.add(
+                "18",
+                ERROR,
+                f"{scope}/{tag}: 翻訳テーブルが **この検査では** JSON として読めません（BOM 付き・"
+                f"構文エラーなど）。Unity 側が同じように失敗するとは限らない（`TextAsset.text` は BOM を"
+                f"落とすため C# 側は読める公算があり、そこは未検証）が、読めない JSON をそのまま出荷"
+                f"するのは正しくないので error のままにしている。まず素の UTF-8（BOM 無し）の"
+                f"正しい JSON へ直すこと",
+                table_rel,
+            )
+            continue
+        tables[tag] = entries
+        table_rels[tag] = table_rel
+
+    # --- 既定ロケールの成立（C# の ValidateScope 冒頭と同じ順序・同じ深刻度） -----------
+    if not default_locale:
+        ctx.add(
+            "18",
+            ERROR,
+            f"{scope}: manifest の defaultLocale が空です。既定ロケールは全ロケールの照合基準"
+            f"であり、無いとカタログの正しさを誰も判定できません",
+            manifest_rel,
+        )
+    if default_locale not in tables:
+        ctx.add(
+            "18",
+            ERROR,
+            f"{scope}: 既定ロケール `{default_locale or '(未設定)'}` の翻訳テーブルが manifest に"
+            f"ありません。基盤が無い環境では既定ロケールのテーブルだけを直接読むため、"
+            f"これが欠けると翻訳キーがそのまま UI に出ます",
+            manifest_rel,
+        )
+        return registered_rels
+
+    # --- 各ロケールの照合（C# の ValidateScope 本体と同じ規則） -------------------------
+    default_table = tables[default_locale]
+    default_keys = set(default_table)
+    for tag in sorted(tables):
+        table = tables[tag]
+        table_rel = table_rels[tag]
+        keys = set(table)
+
+        missing_keys = sorted(default_keys - keys)
+        if missing_keys:
+            ctx.add(
+                "18",
+                ERROR,
+                f"{scope}/{tag}: 既定ロケール `{default_locale}` にあるキーが {len(missing_keys)} 件"
+                f"ありません（{_l10n_sample(missing_keys)}）。欠けたキーは UI にキー名がそのまま"
+                f"出るか既定ロケールの文言のまま残ります",
+                table_rel,
+            )
+
+        extra_keys = sorted(keys - default_keys)
+        if extra_keys:
+            ctx.add(
+                "18",
+                WARN,
+                f"{scope}/{tag}: 既定ロケール `{default_locale}` に無いキーが {len(extra_keys)} 件"
+                f"あります（{_l10n_sample(extra_keys)}）。誰も引かない死んだ訳文か、既定ロケール側の"
+                f"キー削除・改名の取りこぼしのどちらかです",
+                table_rel,
+            )
+
+        gaps: list[str] = []
+        for key in sorted(keys):
+            placeholders = extract_l10n_placeholders(table[key])
+            missing_numbers = find_missing_placeholder_numbers(placeholders)
+            if missing_numbers:
+                gaps.append(
+                    f"{key}（present={_format_l10n_placeholders(placeholders)} / "
+                    f"missing={','.join(str(number) for number in missing_numbers)}）"
+                )
+        if gaps:
+            ctx.add(
+                "18",
+                WARN,
+                f"{scope}/{tag}: placeholder の番号に欠番があるキーが {len(gaps)} 件あります"
+                f"（{_l10n_sample(gaps, 3)}）。`{{1}}` だけで `{{0}}` が無い形は、書式引数の"
+                f"渡し忘れか番号の付け間違いを示します",
+                table_rel,
+            )
+
+        mismatches: list[str] = []
+        same_as_default: list[str] = []
+        for key in sorted(default_keys & keys):
+            expected = extract_l10n_placeholders(default_table[key])
+            actual = extract_l10n_placeholders(table[key])
+            if expected != actual:
+                mismatches.append(
+                    f"{key}（既定={_format_l10n_placeholders(expected)} / "
+                    f"{tag}={_format_l10n_placeholders(actual)}）"
+                )
+            # 固定語（manifest の fixedTerms。型名・ファイル名など全ロケールで同値が正当）は除く
+            if tag != default_locale and table[key] == default_table[key] and key not in fixed_terms:
+                same_as_default.append(key)
+
+        if mismatches:
+            ctx.add(
+                "18",
+                ERROR,
+                f"{scope}/{tag}: placeholder の集合が既定ロケール `{default_locale}` と違うキーが "
+                f"{len(mismatches)} 件あります（{_l10n_sample(mismatches, 3)}）。"
+                f"呼び出し側は既定ロケールの番号を前提に引数を渡すため、"
+                f"**実行時に書式例外か文字化けした文言**になります",
+                table_rel,
+            )
+
+        if same_as_default:
+            ctx.add(
+                "18",
+                WARN,
+                f"{scope}/{tag}: 値が既定ロケール `{default_locale}` と同一のキーが "
+                f"{len(same_as_default)} 件あります（{_l10n_sample(same_as_default)}）。"
+                f"未翻訳の取りこぼしなら訳し、全ロケールで同値が正当な固定語なら manifest の "
+                f"fixedTerms へ登録してください（登録すればこの警告は出ません）",
+                table_rel,
+            )
+
+    return registered_rels
+
+
+def _check_l10n_orphan_tables(ctx: RepoContext, registered_rels: set[str]) -> None:
+    """manifest に登録されていない翻訳テーブル（孤児）を warn で鳴らす。
+
+    C# 側にはこの検査が無い。C# は AssetDatabase から manifest を拾い、そこに書かれた
+    tablePath しか辿らないため、「`Locales/` に JSON を足したが manifest への追記を忘れた」形は
+    構造的に見えない（誰も読まないので、誰も欠落に気付かない）。Python 側は git 追跡パスを
+    直接列挙できるので、この位置でだけ塞げる。
+
+    走査は「登録済みテーブルが実在するフォルダの直下」に限る。フォルダ名（`Locales`）に依存せず、
+    かつ無関係な JSON（asmdef 隣の設定ファイル等）を巻き込まないための範囲設定である。
+    """
+    for directory in sorted({rel.rsplit("/", 1)[0] for rel in registered_rels if "/" in rel}):
+        prefix = f"{directory}/"
+        for candidate in sorted(ctx.tracked):
+            if not candidate.startswith(prefix) or "/" in candidate[len(prefix) :]:
+                continue  # 直下のみ（サブフォルダは別の manifest の管轄でありうる）
+            if not candidate.lower().endswith(".json") or candidate in registered_rels:
+                continue
+            if is_l10n_manifest_path(candidate):
+                continue  # manifest 自身が同じフォルダに置かれている場合
+            if is_unity_ignored_name(candidate.rsplit("/", 1)[-1]):
+                continue  # `.schema.json` など Unity が import しない名前は翻訳テーブルになりえない
+            if ctx.is_waived("18", candidate):
+                continue
+            ctx.add(
+                "18",
+                WARN,
+                "翻訳テーブルらしき JSON が、同じフォルダの翻訳を管轄する manifest のどれにも"
+                "登録されていません。"
+                f"登録が無いロケールは Unity 側の言語切替候補にすら現れないため、訳した内容が"
+                f"誰にも届きません。manifest へ `tag` / `tablePath` を追記するか、"
+                f"使わないなら削除してください",
+                candidate,
+            )
+
+
+# ---------------------------------------------------------------------------
+# 検査 19: 翻訳文書の命名（`<正本の basename>.<locale>.md`）
+#
+# 同梱文書の翻訳版の命名が 2 通りに割れていた（2026-08-09 実測）:
+#   - TAE: `README.ja.md` / `Documentation~/index.ja.md`（**正しい形**）
+#   - UMPD: `ExportedPackages/README_JP.md` ほか（**違反**）
+# root README の翻訳 `docs/readme/README.<locale>.md` は既に前者の形で規定済み（§2.2）なので、
+# 規約自体は存在しており、従っていない置き場所が残っている状態になっている。
+#
+# 命名を `<正本の basename>.<locale>.md` に揃える理由:
+#   - locale の表記を翻訳カタログ（`Locales/<tag>.json`）と一致させると、「どの言語の文書か」を
+#     人も機械も 1 つの規則で読める。`_JP` は国コードであって言語タグではなく、
+#     `zh-Hans` / `pt-BR` のような下位区分を持つ言語をそもそも表現できない。
+#   - 正本と翻訳が名前順で隣り合い、正本（無印）がどれかが一目で決まる。
+#
+# **走査範囲は git 追跡された `.md` 全体**。GOLD_STANDARD §2.2 はこの規約について置き場所を
+# 問わないと明記し、リポジトリ直下の `docs/readme/README.zh-Hans.md` を例に挙げている。
+# `Packages/` 配下に限ると、実際に違反が残っている `ExportedPackages/` や `docs/` を素通りする。
+# `Samples~` / `Documentation~` 配下も当然含む（`.tgz` に入って購入者の手元へ届く）。
+#
+# 判定は**汎用の接尾辞ヒューリスティックではなく、既知のロケールタグ集合に錨を打つ**。
+# 「2〜3 文字の言語らしき接尾辞」方式は、`README.es-ES` のような**正しい名前**を違反と誤判定し、
+# しかも `README.es.es.md` という壊れた改名先を提案していた（`es-ES` / `pt-PT` は実運用の
+# 19 ロケールに含まれ、5 リポジトリの `docs/readme/` に計 10 枚実在する）。同時に
+# `README.jp` / `README_zh-Hans` / `Guide_pt-BR` のような**本物の違反**は取りこぼしていた。
+# ---------------------------------------------------------------------------
+
+# 実運用の 19 ロケール。**正本は各パッケージの `Packages/*/Editor/**/*.l10n-manifest.json` の
+# `locales[].tag`** で、ここはその写しである（検査 19 は翻訳カタログを持たないリポジトリ
+# （サイト等）でも走るため、manifest から動的に読まず定数として持つ）。
+# ロケールを増減したときは manifest と**この定数の両方**を更新すること。
+CANONICAL_LOCALE_TAGS = (
+    "ja", "en", "zh-Hans", "zh-Hant", "ko", "fr", "de", "it",
+    "es-ES", "es-419", "pt-BR", "pt-PT", "ru", "pl", "tr", "th", "vi", "uk", "id",
+)
+CANONICAL_LOCALE_TAG_SET = frozenset(CANONICAL_LOCALE_TAGS)
+CANONICAL_LOCALE_TAG_BY_LOWER = {tag.lower(): tag for tag in CANONICAL_LOCALE_TAGS}
+
+# 誤った書き方 → あるべきロケールタグ。canonical 集合との照合は**大小を無視して**行うため、
+# `JA` / `EN` / `ZH-hans` のような「正しいタグの大小違い・区切り違い」はここに載せる必要が無い
+# （載せるのは canonical 集合に無い綴りだけ）。値は必ず canonical 集合の要素にすること
+# （`sp` → `es` のように canonical に無いタグを提案すると、直した先がまた違反になる）。
+#
+# **`UK` は入れない**: 国コードとしては英国を指すが、ロケールタグとしてはウクライナ語（`uk`）である。
+# 別名として `en` へ読み替えると、本物のウクライナ語文書を英語文書へ改名させてしまう。
+# 別名表に載せない結果、`README-UK.md` は canonical 集合との大小無視照合で `uk`（ウクライナ語）と
+# 解釈される。規約が「国コードではなく言語タグを使う」と定めている以上、この解釈を正とする
+# （英国向け英語のつもりなら、そもそも `README.en.md` が正しい名前である）。
+LOCALE_TAG_ALIASES = {
+    # 1 語（国コード由来・3 文字コード）
+    "jp": "ja", "jpn": "ja",
+    "us": "en", "gb": "en", "eng": "en",
+    "cn": "zh-Hans", "sc": "zh-Hans", "chs": "zh-Hans",
+    # スクリプト未指定の `zh` は実運用の既定である簡体字へ寄せる（繁体字なら提案を `zh-Hant` へ読み替える）
+    "zh": "zh-Hans",
+    "tw": "zh-Hant", "hk": "zh-Hant", "tc": "zh-Hant", "cht": "zh-Hant",
+    "kr": "ko", "kor": "ko",
+    "ger": "de",
+    "br": "pt-BR", "bra": "pt-BR",
+    "vn": "vi",
+    "ua": "uk",
+    # **地域を持つ言語の「地域なし」表記**。`es` / `pt` は canonical 集合に無い（実運用は
+    # `es-ES` / `es-419` / `pt-BR` / `pt-PT` の 4 つ）ので、載せないと `README_ES.md` /
+    # `README_PT.md` / `README_SP.md` が「解決できない＝翻訳文書ではない」と判定されて素通りする。
+    # 提案先は既定の地域（スペイン本国・ポルトガル本国）へ寄せ、意図が中南米・ブラジルなら
+    # 人が `es-419` / `pt-BR` へ読み替える。
+    "es": "es-ES", "sp": "es-ES", "spa": "es-ES", "mx": "es-419", "es-mx": "es-419",
+    "pt": "pt-PT", "por": "pt-PT",
+    # 2 語（言語＋地域）。まとめて読み替えないと 1 語だけが接尾辞と判定され、
+    # `setup-en-US` に対して base に `en` が残った `setup-en.en.md` という壊れた改名先を出す。
+    "ja-jp": "ja",
+    "en-us": "en", "en-gb": "en",
+    "zh-cn": "zh-Hans", "zh-sg": "zh-Hans",
+    "zh-tw": "zh-Hant", "zh-hk": "zh-Hant",
+    "ko-kr": "ko",
+    "vi-vn": "vi",
+    "uk-ua": "uk",
+}
+
+# ファイル名の区切りとして同格に扱う文字（`README.ja` / `README_JP` / `README-jp` を同じ形とみなす）。
+TRANSLATION_DOC_SEPARATOR_RE = re.compile(r"([._-])")
+
+# 生成物・依存物・第三者製アセットのディレクトリ名。通常は git 追跡されないが、追跡されている場合に
+# 走査へ紛れ込まないよう名前で落とす。**第三者製を落とすのは、こちらが改名すると配布元の更新を
+# 取り込むたびに衝突するため**（実例: Lame の `Assets/ThirdParty/lilToon/README_JP.md`。
+# lilToon は第三者製で、命名規約はこちらの規約の適用範囲外）。
+TRANSLATION_DOC_SKIP_DIRS = frozenset({
+    "node_modules", "Library", "Temp", "obj",
+    "ThirdParty", "Third Party", "third_party", "vendor", "Vendor",
+})
+
+
+def resolve_locale_tag(candidate: str) -> str | None:
+    """区切りを `-` に揃えた候補文字列を、大小を無視して canonical なロケールタグへ解決する。"""
+    lowered = candidate.lower()
+    if lowered in CANONICAL_LOCALE_TAG_BY_LOWER:
+        return CANONICAL_LOCALE_TAG_BY_LOWER[lowered]
+    return LOCALE_TAG_ALIASES.get(lowered)
+
+
+def suggest_translation_doc_name(stem: str) -> tuple[str, str] | None:
+    """`.md` を除いた stem から (あるべき locale タグ, あるべき basename) を返す。
+
+    次のどちらかなら None（＝この検査は何も言わない）:
+      - 既に正しい形（stem の最後の `.` 以降が canonical なロケールタグと**完全一致**）
+      - 翻訳文書らしい痕跡が無い（`Third Party Notices` / `getting-started` など）
+    """
+    # 1) 正しい形をまず確定させる。大小まで一致していることを求めるので、`README.zh-hans` のような
+    #    表記ゆれはここでは通らず、2) で違反として拾われる。
+    dot_index = stem.rfind(".")
+    if dot_index >= 0 and stem[dot_index + 1 :] in CANONICAL_LOCALE_TAG_SET:
+        return None
+
+    # 1.5) **stem 全体がロケールタグそのもの**の形（`ja.md` / `es-ES.md` / `zh-Hans.md`）は
+    #      翻訳文書ではなく「その言語のためのファイル」なので何も言わない。下のループの
+    #      `len(tokens) <= count` ガードは 1 セグメントのタグ（`ja`）しか落とせず、
+    #      `es-ES` のような 2 セグメントのタグは base に `es` が残って壊れた提案になる。
+    if resolve_locale_tag(stem.replace("_", "-").replace(".", "-")) is not None:
+        return None
+
+    # 2) 末尾から 1 セグメント / 2 セグメントを取り、区切りを `-` に揃えて照合する。
+    #    2 セグメントを先に見るのは、`Guide_pt-BR` の `BR` だけを拾って base に `pt` を残す
+    #    （＝壊れた改名先を出す）ことを避けるため。
+    pieces = TRANSLATION_DOC_SEPARATOR_RE.split(stem)
+    tokens = pieces[0::2]
+    for count in (2, 1):
+        if len(tokens) <= count:
+            continue  # base が空になる形（stem 全体がロケールタグ）は翻訳文書とみなさない
+        tail = tokens[-count:]
+        if any(not token for token in tail):
+            continue  # `README..ja` のように区切りが連続している形
+        tag = resolve_locale_tag("-".join(tail))
+        if tag is None:
+            continue
+        # 区切りはすべて 1 文字なので、末尾の長さは「先行する区切り 1 + 語の長さ + 語間の区切り」。
+        tail_length = 1 + (count - 1) + sum(len(token) for token in tail)
+        base = stem[:-tail_length]
+        if not base:
+            continue
+        return tag, f"{base}.{tag}.md"
+    return None
+
+
+def check_19_translation_doc_naming(ctx: RepoContext) -> None:
+    for tracked in sorted(ctx.tracked):
+        # 拡張子は大小を無視する（`README_JP.MD` を素通りさせない）。
+        if not tracked.lower().endswith(".md"):
+            continue
+        segments = tracked.split("/")
+        if any(segment in TRANSLATION_DOC_SKIP_DIRS for segment in segments[:-1]):
+            continue
+        if ctx.is_waived("19", tracked):
+            continue
+        suggestion = suggest_translation_doc_name(segments[-1][: -len(".md")])
+        if suggestion is None:
+            continue
+        locale, expected = suggestion
+        base = expected[: -len(f".{locale}.md")]
+        directory = "/".join(segments[:-1])
+        prefix = f"{directory}/" if directory else ""
+        sibling = f"{prefix}{base}.md"
+        # **同じディレクトリに「これはその翻訳版だ」と言える兄弟が実在すること**を error の条件にする。
+        # `id`（インドネシア語）・`it`（イタリア語）・`de` などは英単語やその一部としても現れるため
+        # （`sample-id.md` / `do-it.md`）、タグ集合との一致だけでは翻訳文書だと断定できない。
+        #
+        # 兄弟として認めるのは 2 種類:
+        #   (a) 無印の正本 `<base>.md`
+        #   (b) **正しく名付けられた別言語の翻訳** `<base>.<canonical タグ>.md`
+        # (b) が要るのは、翻訳を専用フォルダへ集める配置では正本がそこに無いため。実例は
+        # GOLD_STANDARD §2.2 が規約の例に挙げている `docs/readme/`（正本は root の `README.md`で、
+        # このフォルダには翻訳 18 枚しか無い）。(a) だけを条件にすると、規約が名指ししている
+        # まさにその場所で違反が warn 止まりになり、CI も pre-push も通ってしまう。
+        siblings = [sibling] if sibling in ctx.tracked else []
+        siblings += [
+            candidate
+            for tag in CANONICAL_LOCALE_TAGS
+            if (candidate := f"{prefix}{base}.{tag}.md") in ctx.tracked
+        ]
+        if siblings:
+            evidence = (
+                f"同じフォルダに正本 `{base}.md` があるため"
+                if sibling in ctx.tracked
+                else f"同じフォルダに正しく名付けられた翻訳 `{siblings[0].split('/')[-1]}` があるため"
+            )
+            ctx.add(
+                "19",
+                ERROR,
+                f"翻訳文書の名前がロケールタグの表記になっていません（`{expected}` にしてください）。"
+                f"{evidence}、これはその翻訳版と判断しました。"
+                f"翻訳文書は `<正本の basename>.<locale>.md` とし、ロケールタグは翻訳カタログ"
+                f"（`Locales/{locale}.json`）と同じ表記を使う規約です（GOLD_STANDARD §2.2）。"
+                f"`_JP` のような国コードは言語タグではなく、`zh-Hans` / `pt-BR` のような下位区分を"
+                f"持つ言語を表現できません。改名は `git mv` で行い、対になる `.md.meta` があれば"
+                f"同時に改名して GUID を保ってください",
+                tracked,
+            )
+        else:
+            ctx.add(
+                "19",
+                WARN,
+                f"翻訳文書らしい名前ですが、同じフォルダに正本 `{base}.md` も、正しく名付けられた"
+                f"別言語の翻訳 `{base}.<locale>.md` も無いため、翻訳版だと断定できません"
+                f"（翻訳版なら `{expected}` へ改名してください）。"
+                f"`it`（イタリア語）や `id`（インドネシア語）は英単語としても現れるため、"
+                f"兄弟ファイルが実在する場合だけ error にしています（GOLD_STANDARD §2.2）",
+                tracked,
+            )
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -2168,6 +2811,8 @@ CHECKS = (
     check_15_stale_screenshots,
     check_16_changelog_coverage,
     check_17_license_surfaces,
+    check_18_l10n_catalogs,
+    check_19_translation_doc_naming,
     check_extra,
 )
 

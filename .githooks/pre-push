@@ -1,0 +1,377 @@
+#!/bin/sh
+# 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
+# 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
+# source: UnityTemplate_2022_3_22f1/scripts/templates/githooks-pre-push
+# source-sha256: 7931123ce08023815624bec8760256d99082320eaf37060b087e852a43b4bcc9
+# push する前に、そのリポジトリで走らせられる検査をまとめて走らせる。
+#
+# pre-commit との役割分担: pre-commit は commit のたびに走るため検査 12（スキルミラーの
+# drift）だけに絞っている。pre-push は**リモートへ出る直前の最後の関所**なので、
+# 標準準拠検査の **error 全件** と、リポジトリごとに宣言した検査コマンドを走らせる。
+# GitHub Actions の無料枠を使わずに手元で品質を担保するための層がこれ。
+#
+# **検査だけを行い、index も working tree も変更しない**（pre-commit と同じ方針）。
+# 直し方は落ちた検査の出力が示すので、hook が勝手に直すことはしない。
+#
+# 有効化（クローンごとに 1 回。core.hooksPath は git 追跡できないため）:
+#   git config core.hooksPath .githooks
+#
+# 注意: `git push --no-verify` で素通りできる。その場合は落ちた検査の内容が
+# そのままリモートへ入る。だからこの hook を唯一の保証にはしない。
+#
+# `set -e` は使わない。1 つ目の検査が落ちた時点で終了してしまうと残りの検査が走らず、
+# 「直して push し直したらまた別の検査で落ちる」を繰り返すことになるため、
+# **全部走らせてから まとめて報告する**。終了コードは各所で明示的に見る。
+#
+# ---------------------------------------------------------------------------
+# 設計判断: この hook が検査するのは「作業ツリー」であって「push される commit」ではない
+# ---------------------------------------------------------------------------
+# 下で走らせる検査はどれも、その時点の**作業ツリーの中身**を読む。push される commit の
+# 中身は読んでいない。したがって「壊れた状態を commit し、そのあと作業ツリーだけ直してから
+# push する」と、この hook は素通りする。これは実在する抜け道である。
+#
+# 完全な解は「push 対象の commit を一時 worktree（git worktree add --detach）へ取り出し、
+# そこで検査を走らせる」ことだが、**採らない**。理由:
+#   - Unity のリポジトリでは push のたびに数百 MB 規模のチェックアウトが増える。pre-push に
+#     毎回その待ち時間を払うのは、この層が担う「早期検出」の価値に見合わない。
+#   - npm を使う検査（MySite / external-content）は node_modules を必要とする。一時 worktree
+#     には無いので毎回入れ直すか親を参照する細工が要る。さらに external-content の宣言は
+#     `requires: "../package.json"` で親チェックアウトの存在を前提にしており、隔離された
+#     一時 worktree ではこの親子関係がそもそも成立しない。
+#   - 検査対象が「今エディタで開いている作業ツリー」でなくなるため、落ちた原因が手元の
+#     状態と一致しなくなる。再現できない指摘は直す作業をかえって遅くする。
+#
+# 採らない代わりに**黙らない**。作業ツリーに未コミットの変更があるときは、
+# 「検査したのは作業ツリーであって push される commit ではない」と目立つ警告を出す。
+# 検査の守備範囲を読み手が誤解したまま安心することが、この設計で唯一許されない失敗である。
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+failed=0
+failures=""
+skipped=0
+skips=""
+
+note_failure() {
+  failed=1
+  failures="${failures}  - $1
+"
+}
+
+note_skip() {
+  skipped=$((skipped + 1))
+  skips="${skips}  - $1
+"
+}
+
+# ---------------------------------------------------------------------------
+# 作業ツリーが dirty かどうかの告知（冒頭の設計判断を参照）
+# ---------------------------------------------------------------------------
+# clean なら作業ツリー == HEAD なので、検査した中身と push される中身のずれは
+# 「HEAD より前の commit だけを push する」ような特殊な場合に限られる。
+# dirty なら両者は確実に違うので、そのことを最初に大きく伝える。
+worktree_status=$(git status --porcelain)
+if [ -n "$worktree_status" ]; then
+  worktree_dirty_count=$(printf '%s\n' "$worktree_status" | wc -l | tr -d ' ')
+  echo "" >&2
+  echo "============================================================" >&2
+  echo "pre-push: 警告 — 検査したのは **作業ツリー** です" >&2
+  echo "  未コミットの変更が ${worktree_dirty_count} 件あります。この hook は作業ツリーの" >&2
+  echo "  中身を検査しており、**push される commit の内容とは違う可能性があります**。" >&2
+  echo "  壊れた状態を commit したあと作業ツリーだけ直した場合、この検査は素通りします。" >&2
+  echo "  未コミットの変更（先頭 5 件）:" >&2
+  printf '%s\n' "$worktree_status" | head -5 | sed 's/^/    /' >&2
+  echo "============================================================" >&2
+  echo "" >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 標準準拠検査（verify_repo_guide.py の error 全件）
+# ---------------------------------------------------------------------------
+# **fail-closed**: python3 が無ければ検査自体を飛ばすが（下の分岐）、検査が走って error を
+# 出したときは必ず push を止める。error は「宣言と実装がずれている」という、そのリポジトリ内で
+# 完結して判定できる客観的な不整合であり、握りつぶす理由が無い。
+# warn は止めない（実態と合っているか人が判断する種類の指摘のため）。出力はそのまま見せる。
+#
+# 終了コードの契約: 0=error なし / 1=error あり / 2=起動失敗。1 と 2 のどちらも押し止める。
+if [ -f scripts/pipeline/verify_repo_guide.py ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    verify_output=$(python3 scripts/pipeline/verify_repo_guide.py 2>&1)
+    verify_status=$?
+    printf '%s\n' "$verify_output"
+    if [ "$verify_status" -ne 0 ]; then
+      note_failure "標準準拠検査 (scripts/pipeline/verify_repo_guide.py)"
+    fi
+  else
+    echo "pre-push: python3 が無いため標準準拠検査をスキップします" >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# pipeline/repo.json の prePush.commands
+# ---------------------------------------------------------------------------
+# 宣言の形（pipeline/repo.json）:
+#   "prePush": {
+#     "commands": [
+#       { "run": "npm run validate:content", "requires": "package.json", "label": "外部コンテンツ検査" }
+#     ]
+#   }
+#   run      … リポジトリルートで `sh -c` で実行するコマンド（必須・文字列）
+#   requires … このパスが無いときは実行せず**警告付きで**skip する（省略可・文字列）
+#   label    … 表示名（省略可・文字列。無ければ run をそのまま出す）
+#
+# **未知のキーは error にする**。`commands` を `commandz` と書き間違えると、宣言した検査が
+# 1 つも走らないまま push が通ってしまう。「何も宣言していない」と「宣言を書き間違えた」を
+# 区別できるのは宣言側のキー名だけなので、ここを緩めると検査の不在が永久に見えなくなる。
+# `requires` の型を厳しく見るのも同じ理由で、文字列でない値は存在しないパスとして扱われ、
+# 「skip」と表示されたまま一度も走らない状態が固定化するため。
+#
+# **fail-open**: python3 が無い環境では prePush を無視して警告だけ出して通す。
+# JSON を読むためだけに python3 の有無で push できなくなるのは代償が大きすぎるため
+# （この hook は「早期検出」であって最終保証ではない。最終的な保証は Cloudflare Pages の
+# ビルドとリリースゲートが持つ）。上の標準準拠検査を fail-closed にしているのとは、
+# 「検査が走って落ちた」のか「検査を走らせる手段が無い」のかという違いで区別している。
+if [ -f pipeline/repo.json ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    plan_file=$(mktemp)
+    trap 'rm -f "$plan_file"' EXIT
+
+    # 中間形式の区切りは **0x1f（US）**。タブは IFS の空白文字なので、`read` が連続する
+    # タブを 1 個の区切りへ畳んでしまい、`requires` を省略した宣言で label が requires の
+    # 位置へずれる（実測して踏んだ）。空白でない制御文字なら空フィールドがそのまま残る。
+    #
+    # 終了コードは**宣言ミスの種類ごとに分ける**。「宣言が不正です」の一文だけでは、
+    # どのキーをどう直せばよいのかが宣言者に伝わらないため。詳細は python 側が
+    # 標準エラーへ 1 行で出し、shell 側は終了コードから同じ原因を言い直す
+    # （python の出力が失われても原因が分かるようにするための二重化）。
+    python3 - "$plan_file" <<'PYTHON'
+import json
+import pathlib
+import sys
+
+SEPARATOR = "\x1f"
+KNOWN_PREPUSH_KEYS = ("commands",)
+KNOWN_ENTRY_KEYS = ("run", "requires", "label")
+
+EXIT_UNREADABLE = 3            # repo.json を読めない
+EXIT_PREPUSH_NOT_OBJECT = 4    # prePush が object でない
+EXIT_PREPUSH_UNKNOWN_KEY = 5   # prePush 直下に未知のキー
+EXIT_ENTRY_UNKNOWN_KEY = 6     # commands の要素に未知のキー
+EXIT_COMMANDS_NOT_LIST = 7     # commands が配列でない
+EXIT_ENTRY_NOT_OBJECT = 8      # commands の要素が object でない
+EXIT_RUN_INVALID = 9           # run が無い / 文字列でない / 空
+EXIT_REQUIRES_NOT_STRING = 10  # requires が文字列でない
+EXIT_LABEL_NOT_STRING = 11     # label が文字列でない
+EXIT_UNSAFE_VALUE = 12         # 中間形式を壊す値（改行・区切り文字）
+EXIT_COMMANDS_MISSING = 13     # prePush はあるのに commands が無い
+
+
+def die(code, message):
+    sys.stderr.write("pre-push: " + message + "\n")
+    sys.exit(code)
+
+
+def type_name(value):
+    return {
+        dict: "object",
+        list: "array",
+        str: "string",
+        bool: "boolean",
+        int: "number",
+        float: "number",
+        type(None): "null",
+    }.get(type(value), type(value).__name__)
+
+
+out = pathlib.Path(sys.argv[1])
+config_path = pathlib.Path("pipeline/repo.json")
+try:
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+except (OSError, ValueError) as error:
+    die(EXIT_UNREADABLE, "pipeline/repo.json を読めません: %s" % error)
+
+if not isinstance(config, dict):
+    die(EXIT_UNREADABLE, "pipeline/repo.json の中身が object ではありません（今の型: %s）" % type_name(config))
+
+if "prePush" not in config:
+    # prePush を持たないリポジトリは正常。verify_repo_guide.py の error 全件で十分と判断した
+    # リポジトリ（Unity の各パッケージ・GP1・vpm-repos）がこれに当たる。
+    out.write_text("", encoding="utf-8")
+    sys.exit(0)
+
+pre_push = config["prePush"]
+if not isinstance(pre_push, dict):
+    die(
+        EXIT_PREPUSH_NOT_OBJECT,
+        "prePush は object で書いてください（今の型: %s）" % type_name(pre_push),
+    )
+
+unknown_keys = sorted(key for key in pre_push if key not in KNOWN_PREPUSH_KEYS)
+if unknown_keys:
+    die(
+        EXIT_PREPUSH_UNKNOWN_KEY,
+        "prePush に未知のキーがあります: %s（使えるのは %s だけです）。"
+        "キー名を打ち間違えると、宣言した検査が 1 つも走らないまま push が通ってしまうため error にしています"
+        % (", ".join(unknown_keys), ", ".join(KNOWN_PREPUSH_KEYS)),
+    )
+
+if "commands" not in pre_push:
+    die(
+        EXIT_COMMANDS_MISSING,
+        "prePush に commands がありません。走らせる検査が無いなら prePush ごと消してください"
+        "（空の prePush は「検査を宣言したのに 1 つも走らない」状態と見分けが付きません）",
+    )
+
+entries = pre_push["commands"]
+if not isinstance(entries, list):
+    die(
+        EXIT_COMMANDS_NOT_LIST,
+        "prePush.commands は配列で書いてください（今の型: %s）" % type_name(entries),
+    )
+
+lines = []
+for index, entry in enumerate(entries):
+    where = "prePush.commands[%d]" % index
+    if not isinstance(entry, dict):
+        die(
+            EXIT_ENTRY_NOT_OBJECT,
+            "%s は object で書いてください（今の型: %s）" % (where, type_name(entry)),
+        )
+
+    unknown_keys = sorted(key for key in entry if key not in KNOWN_ENTRY_KEYS)
+    if unknown_keys:
+        die(
+            EXIT_ENTRY_UNKNOWN_KEY,
+            "%s に未知のキーがあります: %s（使えるのは %s だけです）。"
+            "キー名を打ち間違えると、その指定が黙って無視されたまま push が通ってしまうため error にしています"
+            % (where, ", ".join(unknown_keys), ", ".join(KNOWN_ENTRY_KEYS)),
+        )
+
+    run = entry.get("run")
+    if not isinstance(run, str) or not run.strip():
+        die(
+            EXIT_RUN_INVALID,
+            "%s の run が空か、文字列ではありません（今の型: %s）。run は実行するコマンドを"
+            "文字列で書く必須キーです" % (where, type_name(run)),
+        )
+
+    requires = entry.get("requires")
+    if "requires" in entry and not isinstance(requires, str):
+        die(
+            EXIT_REQUIRES_NOT_STRING,
+            "%s の requires は文字列（パス）で書いてください（今の型: %s）。文字列でない値は"
+            "存在しないパスとして扱われ、宣言した検査が skip のまま一度も走らなくなります。"
+            "条件を付けないなら requires ごと消してください" % (where, type_name(requires)),
+        )
+
+    label = entry.get("label")
+    if "label" in entry and not isinstance(label, str):
+        die(
+            EXIT_LABEL_NOT_STRING,
+            "%s の label は文字列で書いてください（今の型: %s）。表示名を付けないなら "
+            "label ごと消してください" % (where, type_name(label)),
+        )
+
+    fields = []
+    for key, value in (("run", run), ("requires", requires), ("label", label)):
+        text = (value or "").strip()
+        if "\n" in text or SEPARATOR in text:
+            # 区切りを壊す値は、黙って別のフィールドへずれるより止めたほうが安全
+            die(
+                EXIT_UNSAFE_VALUE,
+                "%s の %s に改行または制御文字が含まれています。1 行で書ける値にしてください"
+                % (where, key),
+            )
+        fields.append(text)
+    lines.append(SEPARATOR.join(fields))
+
+out.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+PYTHON
+    plan_status=$?
+
+    # 終了コードから原因を言い直す。python 側の詳細行が失われても、何を直せばよいかが
+    # 分かるようにするため。ここを 1 つの汎用文にまとめると、宣言ミスの種類が潰れる。
+    plan_error=""
+    case "$plan_status" in
+      0)  ;;
+      3)  plan_error="JSON として読めません — 構文が壊れている疑い" ;;
+      4)  plan_error="prePush が object ではありません" ;;
+      5)  plan_error="prePush に未知のキーがあります（commands の打ち間違いの疑い）" ;;
+      6)  plan_error="prePush.commands の要素に未知のキーがあります（run / requires / label の打ち間違いの疑い）" ;;
+      7)  plan_error="prePush.commands が配列ではありません" ;;
+      8)  plan_error="prePush.commands の要素が object ではありません" ;;
+      9)  plan_error="prePush.commands の要素の run が空か、文字列ではありません" ;;
+      10) plan_error="prePush.commands の requires が文字列ではありません" ;;
+      11) plan_error="prePush.commands の label が文字列ではありません" ;;
+      12) plan_error="prePush.commands の値に改行または制御文字が混ざっています" ;;
+      13) plan_error="prePush に commands がありません" ;;
+      *)  plan_error="prePush 宣言の読み取りに失敗しました（終了コード $plan_status）" ;;
+    esac
+
+    if [ -n "$plan_error" ]; then
+      # 末尾の失敗一覧で原因を言い直すので、ここでは二重に出さない
+      note_failure "pipeline/repo.json（$plan_error）"
+    else
+      # パイプではなくリダイレクトで読む。パイプだと while がサブシェルになり、
+      # ループ内で立てた failed が親へ伝わらない（POSIX sh の仕様）。
+      separator=$(printf '\037')
+      while IFS="$separator" read -r run requires label; do
+        [ -n "$run" ] || continue
+        name=${label:-$run}
+        if [ -n "$requires" ] && [ ! -e "$requires" ]; then
+          # 「skip」を淡々と出すと正常時の出力に埋もれる。宣言した検査が走っていないことは
+          # 検査が通ったことと同じ意味ではないので、標準エラーへ警告として出す。
+          echo "pre-push: !! [$name] を実行していません（requires: $requires が見つかりません）" >&2
+          echo "pre-push: !!    宣言した検査が走っていないため、この push はその検査を通っていません" >&2
+          note_skip "$name（requires: $requires が見つからない）"
+          continue
+        fi
+        echo "pre-push: [$name] を実行します"
+        # stdin は /dev/null に向ける。このループの標準入力は $plan_file（残りの検査の一覧）
+        # なので、検査コマンドが標準入力を読むと**後続の検査の行を食い尽くし、宣言した検査が
+        # 無言で走らなくなる**。しかも出力には何も残らないため気付けない。それを防ぐ。
+        sh -c "$run" </dev/null
+        run_status=$?
+        if [ "$run_status" -ne 0 ]; then
+          note_failure "$name（終了コード $run_status）"
+        fi
+      done <"$plan_file"
+    fi
+  else
+    echo "pre-push: python3 が無いため pipeline/repo.json の prePush 宣言をスキップします" >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 判定
+# ---------------------------------------------------------------------------
+# skip した検査は push を止めないが、必ず最後にもう一度出す。実行中の警告は出力に流れて
+# 見えなくなるため、「宣言した検査のうち何件が走っていないか」を末尾で言い直す。
+if [ "$skipped" -ne 0 ]; then
+  echo "" >&2
+  echo "pre-push: 警告 — 宣言した検査のうち ${skipped} 件が実行されていません:" >&2
+  printf '%s' "$skips" >&2
+  echo "  requires が恒久的に満たされない宣言になっていないか確認してください。" >&2
+  echo "" >&2
+fi
+
+if [ -n "$worktree_status" ]; then
+  echo "pre-push: 警告 — 上の検査は作業ツリーを見ています。push される commit の内容とは違う可能性があります。" >&2
+fi
+
+if [ "$failed" -ne 0 ]; then
+  echo "" >&2
+  echo "push を中止しました。次の検査に落ちています:" >&2
+  printf '%s' "$failures" >&2
+  echo "" >&2
+  echo "詳細は上の出力を見てください。直してから push し直してください。" >&2
+  # ここは必ずシングルクォート。ダブルクォート内のバッククォートはコマンド置換として
+  # 展開されてしまい、案内文のつもりで push を実行してしまう。
+  echo 'git push --no-verify で回避できますが、その場合は落ちた検査の内容が' >&2
+  echo 'そのままリモートへ入ります。' >&2
+  echo "" >&2
+  exit 1
+fi
+
+exit 0

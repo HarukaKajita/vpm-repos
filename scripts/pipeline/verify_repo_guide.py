@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: e46f0a6682e9bc1c9ad16581e8d9cfccb3965f5b70a2325e9ec8333e9d4cd703
+# source-sha256: cae8a17a40cde88e14a92281f9fce7a1a14125b32bdabe9592907c3552137817
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -2487,7 +2487,7 @@ def _check_l10n_orphan_tables(ctx: RepoContext, registered_rels: set[str]) -> No
 #
 # 同梱文書の翻訳版の命名が 2 通りに割れていた（2026-08-09 実測）:
 #   - TAE: `README.ja.md` / `Documentation~/index.ja.md`（**正しい形**）
-#   - UMPD: `ExportedPackages/README_JP.md` ほか（**違反**）
+#   - UMPD: `README_JP.md` / `Documentation~/*_JP.md`（**違反**。2026-08-09 に `.ja.md` へ改名済み）
 # root README の翻訳 `docs/readme/README.<locale>.md` は既に前者の形で規定済み（§2.2）なので、
 # 規約自体は存在しており、従っていない置き場所が残っている状態になっている。
 #
@@ -2499,7 +2499,8 @@ def _check_l10n_orphan_tables(ctx: RepoContext, registered_rels: set[str]) -> No
 #
 # **走査範囲は git 追跡された `.md` 全体**。GOLD_STANDARD §2.2 はこの規約について置き場所を
 # 問わないと明記し、リポジトリ直下の `docs/readme/README.zh-Hans.md` を例に挙げている。
-# `Packages/` 配下に限ると、実際に違反が残っている `ExportedPackages/` や `docs/` を素通りする。
+# `Packages/` 配下に限ると、リポジトリ直下の `docs/readme/` や `docs/` を素通りする。
+#   （実測 2026-08-09: `docs/license-draft-ja.md` がこの範囲でだけ拾えた）
 # `Samples~` / `Documentation~` 配下も当然含む（`.tgz` に入って購入者の手元へ届く）。
 #
 # 判定は**汎用の接尾辞ヒューリスティックではなく、既知のロケールタグ集合に錨を打つ**。

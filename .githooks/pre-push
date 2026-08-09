@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/templates/githooks-pre-push
-# source-sha256: 7931123ce08023815624bec8760256d99082320eaf37060b087e852a43b4bcc9
+# source-sha256: 278140f6eb1d6ce52e67be7c27574689a2be57bc8d1cbf720eac8c02b902d4b2
 # push する前に、そのリポジトリで走らせられる検査をまとめて走らせる。
 #
 # pre-commit との役割分担: pre-commit は commit のたびに走るため検査 12（スキルミラーの
@@ -45,6 +45,16 @@
 # 「検査したのは作業ツリーであって push される commit ではない」と目立つ警告を出す。
 # 検査の守備範囲を読み手が誤解したまま安心することが、この設計で唯一許されない失敗である。
 
+# ---------------------------------------------------------------------------
+# 記法の約束: 日本語の直前の変数展開は必ず `${var}` と書く
+# ---------------------------------------------------------------------------
+# `"$name（終了コード $run_status）"` のように `$var` の直後へ日本語を置くと、**UTF-8 ロケールでは
+# 変数名の解釈がマルチバイト文字のバイト列へ食い込み、変数が空に展開されて文字化けする**
+# （macOS の /bin/sh = bash 3.2 で実測。`LC_ALL=C` では正しく出るため、C ロケールで試すと再現しない）。
+# 実測 2026-08-09: GUI の git クライアントから push したときに失敗一覧が
+# 「- ¼çµäºã³ã¼ã ¼」とだけ表示され、どの検査が落ちたのか読めなかった。
+# 波括弧で変数名の終わりを明示すれば起きない。
+
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
@@ -63,6 +73,61 @@ note_skip() {
   skipped=$((skipped + 1))
   skips="${skips}  - $1
 "
+}
+
+# ---------------------------------------------------------------------------
+# node を PATH へ載せる（GUI の git クライアント対策）
+# ---------------------------------------------------------------------------
+# nvm / volta で入れた node は**ログインシェルが初期化スクリプトを読んだときだけ** PATH に載る。
+# GUI の git クライアント（GitHub Desktop / Fork / SourceTree / IDE の Git 統合）は
+# ログインシェルを経由しないため PATH に node が無く、`npm run …` が終了コード 127 で落ちる。
+# これは**検査が失敗したのではなく、検査を実行できなかった**状態である。
+# 実測 2026-08-09: external-content を GUI から push しようとして `env: node: No such file or
+# directory` で止まり、内容には何の問題も無いのに push できなくなった。
+#
+# nvm を source するのは重い（毎回シェルスクリプトを読む）ので、**実体のあるディレクトリを
+# 直接 PATH の先頭へ足す**。既定バージョンは $NVM_DIR/alias/default を見て決め、
+# 決められなければ辞書順で最後（=おおむね新しい版）を採る。
+ensure_node_on_path() {
+  command -v node >/dev/null 2>&1 && return 0
+
+  nvm_dir=${NVM_DIR:-$HOME/.nvm}
+  if [ -d "$nvm_dir/versions/node" ]; then
+    wanted=""
+    if [ -f "$nvm_dir/alias/default" ]; then
+      wanted=$(cat "$nvm_dir/alias/default" 2>/dev/null)
+    fi
+    candidate=""
+    # 既定バージョンの指定（`22` のような系列指定もありうる）で前方一致を試す
+    if [ -n "$wanted" ]; then
+      for dir in "$nvm_dir/versions/node"/v"$wanted"*; do
+        [ -x "$dir/bin/node" ] && candidate=$dir
+      done
+    fi
+    # 見つからなければ辞書順で最後を採る
+    if [ -z "$candidate" ]; then
+      for dir in "$nvm_dir/versions/node"/*; do
+        [ -x "$dir/bin/node" ] && candidate=$dir
+      done
+    fi
+    if [ -n "$candidate" ]; then
+      PATH="$candidate/bin:$PATH"
+      export PATH
+      echo "pre-push: node が PATH に無かったので nvm の $(basename "$candidate") を使います" >&2
+      return 0
+    fi
+  fi
+
+  for dir in "$HOME/.volta/bin" /opt/homebrew/bin /usr/local/bin; do
+    if [ -x "$dir/node" ]; then
+      PATH="$dir:$PATH"
+      export PATH
+      echo "pre-push: node が PATH に無かったので $dir を使います" >&2
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -306,16 +371,21 @@ PYTHON
       11) plan_error="prePush.commands の label が文字列ではありません" ;;
       12) plan_error="prePush.commands の値に改行または制御文字が混ざっています" ;;
       13) plan_error="prePush に commands がありません" ;;
-      *)  plan_error="prePush 宣言の読み取りに失敗しました（終了コード $plan_status）" ;;
+      *)  plan_error="prePush 宣言の読み取りに失敗しました（終了コード ${plan_status}）" ;;
     esac
 
     if [ -n "$plan_error" ]; then
       # 末尾の失敗一覧で原因を言い直すので、ここでは二重に出さない
-      note_failure "pipeline/repo.json（$plan_error）"
+      note_failure "pipeline/repo.json（${plan_error}）"
     else
       # パイプではなくリダイレクトで読む。パイプだと while がサブシェルになり、
       # ループ内で立てた failed が親へ伝わらない（POSIX sh の仕様）。
       separator=$(printf '\037')
+      # 宣言した検査に node / npm を使うものがあるなら、先に PATH を整えておく。
+      node_available=1
+      if grep -q 'npm\|node' "$plan_file" 2>/dev/null; then
+        ensure_node_on_path || node_available=0
+      fi
       while IFS="$separator" read -r run requires label; do
         [ -n "$run" ] || continue
         name=${label:-$run}
@@ -324,9 +394,23 @@ PYTHON
           # 検査が通ったことと同じ意味ではないので、標準エラーへ警告として出す。
           echo "pre-push: !! [$name] を実行していません（requires: $requires が見つかりません）" >&2
           echo "pre-push: !!    宣言した検査が走っていないため、この push はその検査を通っていません" >&2
-          note_skip "$name（requires: $requires が見つからない）"
+          note_skip "${name}（requires: ${requires} が見つからない）"
           continue
         fi
+        # **実行できないことと、実行して落ちることは別**。node が無いのに走らせると
+        # 終了コード 127 で「検査に落ちた」と報告してしまい、内容に何の問題も無い push が
+        # 止まる。実行できないなら skip として扱い、なぜ実行できないかを言う。
+        case "$run" in
+          *npm\ *|*node\ *|npm|node)
+            if [ "$node_available" -eq 0 ]; then
+              echo "pre-push: !! [$name] を実行していません（node が見つかりません）" >&2
+              echo "pre-push: !!    GUI の git クライアントは nvm / volta の PATH を引き継ぎません。" >&2
+              echo "pre-push: !!    ターミナルから push するか、クライアントの PATH へ node を足してください。" >&2
+              note_skip "${name}（node が見つからない）"
+              continue
+            fi
+            ;;
+        esac
         echo "pre-push: [$name] を実行します"
         # stdin は /dev/null に向ける。このループの標準入力は $plan_file（残りの検査の一覧）
         # なので、検査コマンドが標準入力を読むと**後続の検査の行を食い尽くし、宣言した検査が
@@ -334,7 +418,7 @@ PYTHON
         sh -c "$run" </dev/null
         run_status=$?
         if [ "$run_status" -ne 0 ]; then
-          note_failure "$name（終了コード $run_status）"
+          note_failure "${name}（終了コード ${run_status}）"
         fi
       done <"$plan_file"
     fi

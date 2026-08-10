@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: cae8a17a40cde88e14a92281f9fce7a1a14125b32bdabe9592907c3552137817
+# source-sha256: f9db190a1fc5ce6d275ba57bba3ea7f0e20394537688847196a5463e300911f6
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -1460,6 +1460,13 @@ def _worktree_dirty_paths(root: Path) -> set[str]:
 
 
 def check_15_stale_screenshots(ctx: RepoContext) -> None:
+    """検査 15「画像と実物の一致」。同梱スクリーンショットが現物の UI と食い違っていないかを見る。
+
+    かつて「同梱画像の鮮度」と呼んでいたが、**「いつ撮ったか」の話に読めて誤解を招く**ため
+    2026-08-10 に呼び名を変えた。実際に問うているのは撮影時期ではなく、
+    **その画像が今の画面と同じものを写しているか**である（判定にコミット時刻を使うのは
+    それを直接測れないからで、時刻は代理指標にすぎない）。
+    """
     # 翻訳カタログはリポジトリ内で共有されうるので、所属パッケージで絞らない
     locale_paths = sorted(t for t in ctx.tracked if t.endswith(".json") and "/Locales/" in t)
 
@@ -1513,7 +1520,7 @@ def check_15_stale_screenshots(ctx: RepoContext) -> None:
             ctx.add(
                 "15",
                 WARN,
-                f"{name}: 同梱スクリーンショットが UI の実装より古いままです"
+                f"{name}: 同梱スクリーンショットが実物の UI と一致していないおそれがあります"
                 f"（UI は {ui_date} に {ui_label} を変更）。同梱画像は購入者が README や "
                 f"Documentation~ で最初に見る説明なので、現行 UI と食い違うと実装ではなく画像のほうを"
                 f"信じます。画像は文言を grep しても出てこない唯一のサーフェスなので、UI を直しても"

@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: f9db190a1fc5ce6d275ba57bba3ea7f0e20394537688847196a5463e300911f6
+# source-sha256: 54d21040ec6497932217638037aec63f333f7eb8adf8db5fac11e15a20097ae0
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -121,12 +121,12 @@ ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 KNOWN_CONFIG_KEYS = frozenset({
     "$schemaVersion", "repository", "role", "productSlug", "tagPolicy",
     "saleUnit", "packagePolicies", "skillRefs", "skillSync", "waivers",
-    "licensePageLanguages", "prePush", "normativeDocs", "notes",
+    "licensePageLanguages", "prePush", "normativeDocs", "externalSkills", "notes",
 })
 
 VALID_CHECK_IDS = {
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-    "11", "12", "13", "14", "15", "16", "17", "18", "19", "+",
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "+",
 }
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
@@ -2699,6 +2699,72 @@ def check_19_translation_doc_naming(ctx: RepoContext) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# 検査 20: 宣言したスキルが版管理下にあるか（2026-08-10 制定）
+#
+# 検査 10 は「宣言したスキルがどこかのスコープに実在するか」しか見ない。索引には
+# `~/.claude/skills` / `~/.agents/skills`（ホームスコープ）が含まれるので、**版管理外の
+# 手元フォルダに置いただけのスキルでも緑になる**。
+#
+# 実際にそれで事故が起きた（2026-08-10 実測）。パイプラインの中核である
+# `release-unity-package`（68KB）を含む 6 件が、履歴もバックアップもレビューも無い
+# `~/.claude/skills/` の実体フォルダとして 1 か所だけに存在していた。8 リポジトリが
+# `skillRefs` で宣言していたが、検査 10 は全部緑を出していた。マシンが飛べば消える状態である。
+#
+# この検査は**ホームスコープを索引から外して**同じ宣言を解決し直す。版管理下の正本へ
+# 解決できないものを error にする。第三者製のスキル（自分たちが版管理する対象ではないもの）は
+# `pipeline/repo.json` の `externalSkills` で名前を挙げて除外する。
+# ---------------------------------------------------------------------------
+
+
+def _versioned_skill_index(ctx: RepoContext) -> tuple[set[str], bool]:
+    """**版管理下の正本だけ**を走査してスキル名の集合を返す（ホームスコープは見ない）。"""
+    names: set[str] = set()
+
+    def add(directory: Path) -> None:
+        names.update(_index_skills(directory, None).keys())
+
+    # 自リポジトリ
+    add(ctx.root / "skills")
+    if (ctx.root / "Packages").is_dir():
+        for skills_dir in sorted((ctx.root / "Packages").glob("*/skills")):
+            add(skills_dir)
+
+    site_root = resolve_site_repo(ctx)
+    if site_root is None:
+        return names, False
+    add(site_root / "skills")
+    for repo_path in resolve_registry_repos(site_root):
+        add(repo_path / "skills")
+        for skills_dir in sorted(repo_path.glob("Packages/*/skills")):
+            add(skills_dir)
+    return names, True
+
+
+def check_20_skills_under_version_control(ctx: RepoContext) -> None:
+    declared = [str(item) for item in ctx.config.get("skillRefs") or []]
+    if not declared:
+        return
+    external = {str(item) for item in ctx.config.get("externalSkills") or []}
+    versioned, registry_resolved = _versioned_skill_index(ctx)
+
+    for skill in sorted(set(declared)):
+        if skill in external or skill in versioned or ctx.is_waived("20", skill):
+            continue
+        severity = ERROR if registry_resolved else WARN
+        note = "" if registry_resolved else "（MySite を解決できないため未確認）"
+        ctx.add(
+            "20",
+            severity,
+            f"宣言されたスキル `{skill}` が版管理下の正本に見つかりません{note}。"
+            f"手元の `~/.claude/skills` にあるだけの状態は、履歴もバックアップもレビューも無く、"
+            f"マシンが飛べば消えます（2026-08-10 に実際に 6 件がこの状態でした）。"
+            f"自分たちのスキルなら GOLD_STANDARD §2.6 の類型に従って正本を置いてください"
+            f"（開発・運用スキルは `MySite/skills/`、購入者へ同梱するスキルは `Packages/<pkg>/skills/`）。"
+            f"第三者製で版管理の対象外なら `pipeline/repo.json` の `externalSkills` へ名前を挙げてください",
+        )
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -2821,6 +2887,7 @@ CHECKS = (
     check_17_license_surfaces,
     check_18_l10n_catalogs,
     check_19_translation_doc_naming,
+    check_20_skills_under_version_control,
     check_extra,
 )
 

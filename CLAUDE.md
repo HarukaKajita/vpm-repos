@@ -18,6 +18,23 @@ kajitaharuka 名義の Unity パッケージを **VCC / ALCOM（VRChat Package M
 | `Website/` | 人が編集する（ランディングページの体裁。任意） |
 | `index.json` / `docs/` の生成物 | **GitHub Actions が生成する。手で編集しない** |
 
+## 何を掲載するか（2026-08-15 決定）
+
+**掲載するのは無料公開しているパッケージだけ**にしています。2026-08-15 時点では
+`UnityEditorLocalization` の 1 つで、`githubRepos` にもそれしか並んでいません。
+
+理由は、VCC / ALCOM のリスティングは URL を知っていれば誰でも購読でき、**そこに並べた
+パッケージは誰でも取得できる**ためです。有料販売しているパッケージ（EPE / UEWCE / TAE / UMPD）は
+ここへ載せません。
+
+この方針から次が従います。**有料パッケージのリポジトリで VPM 形式の成果物を書き出す必要はありません。**
+販売単位の宣言（各リポジトリの `pipeline/repo.json` の `saleUnit.distribution`）からも
+`vpm-zip` を外してあり、新規リリースへ VPM の zip は添付しません
+（**過去のリリースに添付済みのものは、購入者の手元との整合を崩さないため削除しません**）。
+
+今後、無料公開するパッケージを作った場合はここへ追加する余地があります。その場合は
+`githubRepos` へリポジトリを足し、当該リポジトリ側の `saleUnit.distribution` に `vpm-zip` を戻します。
+
 ## 反映のしくみ（ここを間違えると「リリースしたのに VCC に出ない」が起きる）
 
 `.github/workflows/build-listing.yml` が `source.json` の `githubRepos` に並んだリポジトリの **GitHub Releases を走査**して `index.json` を再生成します。

@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 54d21040ec6497932217638037aec63f333f7eb8adf8db5fac11e15a20097ae0
+# source-sha256: c6cc3bc133516e9da3c3ef5547d0e3a65d36a7b91b104445ff57b4398ac22c34
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -15,6 +15,8 @@
     python3 scripts/pipeline/verify_repo_guide.py            # 検査（error があれば非ゼロ終了）
     python3 scripts/pipeline/verify_repo_guide.py --strict   # warn も失敗として扱う
     python3 scripts/pipeline/verify_repo_guide.py --json     # 機械可読の結果を出力
+    python3 scripts/pipeline/verify_repo_guide.py --separate-untracked
+                                                             # 未追跡ファイル起因の指摘を別枠へ分ける
 
 検査対象の細則:
 - `.meta` 検査はパッケージルート自身を対象にしない（UPM 慣例で root は `.meta` を持たない。
@@ -25,6 +27,19 @@
 - 「同梱物（`.tgz` に入るパス）」は `Packages/<name>/` 配下の git 追跡ファイル全部で、`.meta` も
   `Tests/` も `Samples~` / `Documentation~` も含む（実物の tgz と `git ls-tree` の突き合わせで確認）。
   除くのは npm / `Client.Pack` が既定で落とす OS・VCS 由来の名前だけ。
+
+「自分の変更だけを見る」ための分離（`--separate-untracked`・2026-08-14 追加）:
+- 同じリポジトリで複数のエージェントが並行作業すると、**他の作業が置いた未追跡ファイルで検査 6 が
+  構造的に赤くなる**（実測 2026-08-14: TAE で error 14 件・UMPD で error 26 件が出たが、全件が
+  並行作業の未追跡ファイルで、当人の変更由来は 0 件だった）。赤が常態になると本物の error を見落とす。
+- **絞り込み（`--paths <glob>` 方式）は採らない。** 対象を狭める手段は「見なかったことにする」に
+  転びやすく、しかも狭めた範囲の外に本物の error があっても出力から消えてしまう。代わりに
+  **全件を検査したまま、未追跡ファイル起因の指摘だけを別枠へ寄せて両方見せる**（消さない・隠さない）。
+- 「自分の変更」と「他人の置き土産」を分ける境界は **git の index** に置く。`git add -N`（intent-to-add）
+  したものは追跡済みとして扱われ、通常の集計に戻る。つまり **コミット前に自分の変更を検査したいなら
+  intent-to-add してから走らせる**のが正しい手順で、これは検査 6 に限らず新規ファイルを置く作業全般の
+  前提になる（GOLD_STANDARD §2.10 の検査 6 の項）。
+- 既定（フラグ無し）の挙動は一切変えない。pre-push hook はフラグ無しで呼ぶため、関門は緩まない。
 
 正本: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
 各開発リポジトリへは scripts/distribute_standard.py が配布する（配布物は編集しない）。
@@ -126,7 +141,7 @@ KNOWN_CONFIG_KEYS = frozenset({
 
 VALID_CHECK_IDS = {
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "+",
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "+",
 }
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
@@ -143,6 +158,34 @@ class Finding:
     severity: str
     message: str
     path: str | None = None
+    # git がまだ知らない（未追跡の）ファイルに起因する指摘か。並行作業の置き土産と
+    # 自分の変更を切り分けるための属性で、`--separate-untracked` のときだけ出力を分ける。
+    # **判定の強さ（error / warn）は変わらない**。付けるのは指摘を出す側で、
+    # 「その指摘の主語であるアセット自体を git が知らない」ときに限る。
+    untracked: bool = False
+
+
+def finding_payload(finding: Finding) -> dict:
+    """`--json` 出力用の辞書。
+
+    `finding.__dict__` をそのまま出さないのは、**内部の属性を 1 つ足しただけで JSON の
+    キー集合が変わり、読み手の互換が黙って壊れる**ため（`untracked` を足したときに実際に
+    起きかけた）。出力の形はここで明示的に固定する。
+    """
+    return {
+        "check": finding.check,
+        "severity": finding.severity,
+        "message": finding.message,
+        "path": finding.path,
+    }
+
+
+def split_untracked(findings: list[Finding]) -> tuple[list[Finding], list[Finding]]:
+    """(未追跡起因でない指摘, 未追跡起因の指摘) に分ける。順序は元のまま保つ。"""
+    return (
+        [finding for finding in findings if not finding.untracked],
+        [finding for finding in findings if finding.untracked],
+    )
 
 
 def collapse_findings(findings: list[Finding]) -> list[str]:
@@ -179,8 +222,15 @@ class RepoContext:
     packages: list[tuple[str, Path, dict]] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
 
-    def add(self, check: str, severity: str, message: str, path: str | None = None) -> None:
-        self.findings.append(Finding(check, severity, message, path))
+    def add(
+        self,
+        check: str,
+        severity: str,
+        message: str,
+        path: str | None = None,
+        untracked: bool = False,
+    ) -> None:
+        self.findings.append(Finding(check, severity, message, path, untracked))
 
     @property
     def role(self) -> str:
@@ -629,6 +679,19 @@ def _package_has_tests(package_dir: Path) -> bool:
     return bool([path for path in tests.rglob("*.cs") if path.is_file()])
 
 
+def _has_negative_test_claim(line: str) -> bool:
+    """テストの整備状況を否定している文が 1 つでもあるか。
+
+    話題語（テスト・EditMode 等）と否定語が**同じ文の中に**現れたときだけ真とする。
+    行全体で見ると、無関係な 2 つの文に散った語を拾って誤検出する。
+    文の切れ目は句点・改行相当の記号で見る（Markdown の 1 行に複数文が入るため）。
+    """
+    for sentence in re.split(r"[。！？]", line):
+        if TEST_SUBJECT_RE.search(sentence) and NEGATIVE_CLAIM_RE.search(sentence):
+            return True
+    return False
+
+
 def check_04_test_policy(ctx: RepoContext) -> None:
     policies = ctx.config.get("packagePolicies") or {}
 
@@ -655,7 +718,12 @@ def check_04_test_policy(ctx: RepoContext) -> None:
         for doc in collect_doc_files(ctx):
             rel_doc = doc.relative_to(ctx.root).as_posix()
             for number, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), start=1):
-                if not TEST_SUBJECT_RE.search(line) or not NEGATIVE_CLAIM_RE.search(line):
+                # 話題語と否定語を「行」でなく「文」の単位で見る。行で見ると、別々の文に
+                # 散っている 2 語を拾ってしまう。実測（2026-08-14 / UMPD CLAUDE.md:156）:
+                # 「…テストの期待値も実行 OS で割れなくなる。`Environment.NewLine` を使ってよいのは…
+                # OS ごとに中身が変わる理由が無い。」が、「テスト」と「が無い」の同居として鳴った。
+                # どちらの文もテストの整備状況を否定していない。
+                if not _has_negative_test_claim(line):
                     continue
                 if ctx.is_waived("4", line.strip()):
                     continue
@@ -695,9 +763,17 @@ def check_05_testables(ctx: RepoContext) -> None:
 
 
 def check_06_meta_completeness(ctx: RepoContext) -> None:
+    """パッケージ配下の全ファイル・全サブフォルダに `.meta` があり、git 追跡されていることを見る。
+
+    指摘には「未追跡起因かどうか」の印を付ける（`--separate-untracked` で別枠へ寄せるため）。
+    印を付ける条件は**その指摘の主語であるアセット自体を git が知らないこと**で、
+    「追跡済みのアセットなのに `.meta` が欠けている／追跡されていない」は印を付けない。
+    後者は自分がコミットした内容そのものの不備であり、他人の作業では説明できないため。
+    """
     for _, package_dir, _ in ctx.packages:
         root_meta = package_dir.parent / f"{package_dir.name}.meta"
         if root_meta.exists():
+            # ルートの `.meta` は追跡の有無に関わらず「あること自体」が UPM 慣例違反なので分離しない
             ctx.add(
                 "6",
                 ERROR,
@@ -711,12 +787,22 @@ def check_06_meta_completeness(ctx: RepoContext) -> None:
             for entry, is_dir in entries:
                 rel = entry.relative_to(ctx.root).as_posix()
                 meta_rel = f"{rel}.meta"
+                # git はフォルダを追跡しないので、フォルダは「追跡ファイルを含むか」で見る。
+                # `git add -N`（intent-to-add）したものは index に載るため追跡済みとして扱われ、
+                # 自分の作業中の変更はここで未追跡起因から外れる（これが分離の境界）。
+                asset_untracked = rel not in (ctx.tracked_dirs if is_dir else ctx.tracked)
                 if not (ctx.root / meta_rel).exists():
-                    ctx.add("6", ERROR, "ディスク上に .meta がありません", rel)
+                    ctx.add("6", ERROR, "ディスク上に .meta がありません", rel, untracked=asset_untracked)
                 elif meta_rel not in ctx.tracked:
-                    ctx.add("6", ERROR, ".meta が git 追跡されていません（利用者側でだけ壊れる）", meta_rel)
+                    ctx.add(
+                        "6",
+                        ERROR,
+                        ".meta が git 追跡されていません（利用者側でだけ壊れる）",
+                        meta_rel,
+                        untracked=asset_untracked,
+                    )
                 if not is_dir and rel not in ctx.tracked:
-                    ctx.add("6", ERROR, "アセット本体が git 追跡されていません", rel)
+                    ctx.add("6", ERROR, "アセット本体が git 追跡されていません", rel, untracked=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2232,12 +2318,14 @@ def check_18_l10n_catalogs(ctx: RepoContext) -> None:
     # manifest ごとに独立して判定すると、1 つの `Locales/` フォルダを 2 つの manifest が
     # 分け合う構成（scope を分けた本体と拡張など）で、互いのテーブルを孤児として偽 warn する。
     registered_rels: set[str] = set()
+    # scope → 先にその scope を宣言した manifest。C# は 2 つめ以降の manifest を**丸ごと**捨てる。
+    seen_scopes: dict[str, str] = {}
     for manifest_rel in manifests:
-        registered_rels |= _check_l10n_manifest(ctx, manifest_rel)
+        registered_rels |= _check_l10n_manifest(ctx, manifest_rel, seen_scopes)
     _check_l10n_orphan_tables(ctx, registered_rels)
 
 
-def _check_l10n_manifest(ctx: RepoContext, manifest_rel: str) -> set[str]:
+def _check_l10n_manifest(ctx: RepoContext, manifest_rel: str, seen_scopes: dict[str, str]) -> set[str]:
     """1 つの manifest を検証し、**登録済み tablePath の集合**を返す（孤児判定は呼び出し元が行う）。"""
     manifest_path = ctx.root / manifest_rel
     if ctx.is_waived("18", manifest_rel):
@@ -2266,6 +2354,22 @@ def _check_l10n_manifest(ctx: RepoContext, manifest_rel: str) -> set[str]:
             manifest_rel,
         )
         return set()
+
+    # 同じ scope を 2 つの manifest が名乗ると、C# は**後から読んだ manifest を丸ごと無視する**
+    # （`EditorL10nCatalog.TryAddManifest` の重複判定）。無視された側のテーブルは表示にも検証にも
+    # 現れないので、そちらの不備は永久に見えない。重複タグ（下）と同じ理由で error にする。
+    if scope in seen_scopes:
+        ctx.add(
+            "18",
+            ERROR,
+            f"{scope}: この scope は `{seen_scopes[scope]}` が既に宣言しています。Unity 側は"
+            f"先に読んだ manifest だけを採用し、後の manifest を**丸ごと**無視するため、"
+            f"こちらのテーブルは表示にも検証にも現れません。scope を分けるか manifest を"
+            f"統合してください",
+            manifest_rel,
+        )
+        return set()
+    seen_scopes[scope] = manifest_rel
 
     default_locale = normalize_locale_tag(str(document.get("defaultLocale") or ""))
     fixed_terms = {item for item in (document.get("fixedTerms") or []) if isinstance(item, str)}
@@ -2342,6 +2446,20 @@ def _check_l10n_manifest(ctx: RepoContext, manifest_rel: str) -> set[str]:
                 table_rel,
             )
             continue
+        # テーブル自身が名乗る `locale` と manifest の `tag` の食い違い（C# の `LoadEntries` が
+        # 同じ条件で警告を出す）。読み込みは manifest の tag で行われるので表示は壊れないが、
+        # 「別ロケールのテーブルを取り違えて登録した」ときの唯一の手掛かりがこれになる。
+        # `load_l10n_table` は entries しか返さないので、この 1 フィールドだけ読み直す。
+        declared_tag = normalize_locale_tag(str((load_json(table_path) or {}).get("locale") or ""))
+        if declared_tag and declared_tag != tag:
+            ctx.add(
+                "18",
+                WARN,
+                f"{scope}/{tag}: テーブルが名乗るロケール `{declared_tag}` が manifest の tag と"
+                f"違います。Unity 側は manifest の tag で登録するため表示は壊れませんが、"
+                f"別ロケールのテーブルを取り違えて登録している疑いがあります",
+                table_rel,
+            )
         tables[tag] = entries
         table_rels[tag] = table_rel
 
@@ -2765,6 +2883,357 @@ def check_20_skills_under_version_control(ctx: RepoContext) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# 検査 21: コードが宣言・参照する翻訳キーが、既定ロケールのカタログに載っていること
+#
+# 検査 18 が見るのは**ロケール同士の一致**だけである。全ロケールが等しく欠いているキーは、
+# 集合が揃っているので構造上まったく鳴らない。実際にそれで抜けた（2026-08-14 / UMPD）:
+# `UmpdTextKey` へ 13 キーを足して 19 ロケールの JSON を 1 つも更新しないままリリース直前まで
+# 進み、`Rendering (Mixed)` と出ていたグループ見出しが `group.header.mixed` に化けた。
+# `Tr` はキーが未登録のとき**キー文字列をそのまま返し、書式引数を捨てる**ため、例外は出ず、
+# 機能テストも緑のままになる。人の目でしか気付けない位置にあるので機械で塞ぐ。
+#
+# 同じ穴は EditMode テスト（`editor-localization-optional-integration` 同梱の
+# `TextKeyCatalogCoverage.cs.txt`）でも塞げるが、**それは Unity を起動しないと走らない**。
+# カタログを編集する作業の大半は Unity の外（エージェントによる翻訳追加・複数リポジトリ跨ぎ・
+# 他プロジェクトで Editor がロックを持っている場合）で起きるので、同じ判定を Unity 非依存で
+# 持つ。二重管理に見えるが、片方は「出荷コードの探索経路をそのまま使う」ことに価値があり、
+# こちらは「Unity 無しで push 前に落とせる」ことに価値がある。判定規則が食い違うと困るのは
+# **キーの網羅**という 1 点だけで、そこは両方とも「defaultLocale のテーブルに在るか」で同じ。
+#
+# 走査は git 追跡された `Packages/**/*.cs` のみ。未追跡のコードは配布物に入らないため、
+# 追跡外の宣言を根拠に「在る／無い」を判定すると手元だけで通る検査になる。
+# ---------------------------------------------------------------------------
+
+# `internal const string Foo = "bar";` / `public const string ...`。UEL 同梱スキルの
+# `check_tr_placeholder_parity.py` と同じ抽出規則。
+L10N_CONST_RE = re.compile(r"const\s+string\s+(?P<name>\w+)\s*=\s*\"(?P<value>(?:[^\"\\]|\\.)*)\"\s*;")
+# 翻訳キーを集約するクラス。`EpeTextKey` / `UmpdTextKey` / `TaeTextKey` のように接尾辞で名乗る。
+L10N_TEXTKEY_CLASS_RE = re.compile(r"\bclass\s+(?P<name>\w*TextKey)\b")
+# ファサードの `Tr` 宣言。`static string Tr(string key, params object[] args)` のような形。
+L10N_TR_DECL_RE = re.compile(r"\bstatic\s+string\s+Tr\s*\((?P<params>[^)]*)\)")
+L10N_CLASS_RE = re.compile(r"\b(?:static\s+|sealed\s+|partial\s+|abstract\s+)*class\s+(?P<name>\w+)")
+# `Tr` の第 1 引数が翻訳キー定数の参照らしい形か。この形で解決できないのは「動的なキー」ではなく
+# 走査範囲か命名の問題なので、警告ではなく error にする（黙って検査から抜けるのを防ぐ）。
+L10N_KEY_CONST_REF_RE = re.compile(r"^\w*(?:TextKey|Keys?)\.\w+$")
+
+
+@dataclass
+class L10nScopeTable:
+    """1 つの scope の既定ロケールテーブル（検査 21 と入口スクリプトが共有する最小の情報）。"""
+
+    scope: str
+    default_locale: str
+    table_rel: str
+    entries: dict[str, str]
+
+
+@dataclass
+class L10nFacade:
+    """`Tr` を提供するファサード 1 つぶん。呼び出し規約（scope 引数の有無）と既定 scope を持つ。"""
+
+    class_name: str
+    key_index: int
+    scope: str | None
+    declared_in: str
+
+
+def collect_l10n_default_tables(ctx: RepoContext) -> list[L10nScopeTable]:
+    """各 scope の**既定ロケールのテーブルだけ**を読む軽量な読み込み。
+
+    manifest とテーブルの不備（tablePath 欠落・重複タグ・未追跡・壊れた JSON）を判定するのは
+    検査 18 の責務で、ここは判定を一切持たない。読めなかった scope は黙って落とす
+    （落ちた理由は検査 18 が同じ実行の中で必ず報告する）。
+    """
+    tables: list[L10nScopeTable] = []
+    for manifest_rel in sorted(rel for rel in ctx.tracked
+                               if rel.startswith("Packages/") and is_l10n_manifest_path(rel)):
+        manifest_path = ctx.root / manifest_rel
+        document = load_json(manifest_path)
+        if document is None:
+            continue
+        scope = str(document.get("scope") or "").strip()
+        default_locale = normalize_locale_tag(str(document.get("defaultLocale") or ""))
+        if not scope or not default_locale:
+            continue
+        for locale in document.get("locales") or []:
+            if not isinstance(locale, dict):
+                continue
+            if normalize_locale_tag(str(locale.get("tag") or "")) != default_locale:
+                continue
+            table_path = manifest_path.parent / str(locale.get("tablePath") or "")
+            entries = load_l10n_table(table_path) if table_path.is_file() else None
+            if entries is None:
+                break
+            table_rel = os.path.relpath(table_path, ctx.root).replace(os.sep, "/")
+            tables.append(L10nScopeTable(scope, default_locale, table_rel, entries))
+            break
+    return tables
+
+
+def _enclosing_class(content: str, position: int) -> str | None:
+    """`position` より前にある直近の `class X` 宣言の名前（ファサードの所属を決めるのに使う）。"""
+    last = None
+    for match in L10N_CLASS_RE.finditer(content, 0, position):
+        last = match.group("name")
+    return last
+
+
+def _l10n_source_files(ctx: RepoContext) -> list[tuple[str, str]]:
+    """git 追跡された `Packages/**/*.cs` を (相対パス, 本文) で返す（読めないものは飛ばす）。"""
+    files: list[tuple[str, str]] = []
+    for rel in sorted(rel for rel in ctx.tracked
+                      if rel.startswith("Packages/") and rel.endswith(".cs")):
+        try:
+            files.append((rel, (ctx.root / rel).read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError):
+            continue
+    return files
+
+
+def collect_l10n_facades(ctx: RepoContext, sources: list[tuple[str, str]] | None = None) -> list[L10nFacade]:
+    """`Tr` を提供するクラスを宣言から見つけ、呼び出し規約と既定 scope を決める。
+
+    設定ファイルへ書かせず宣言から読むのは、ファサード名を変えたときに設定だけが古くなって
+    「検査しているつもりで 0 件」になるのを避けるため。第 1 引数が `scope` という名前なら
+    scope 先頭型（基盤の `EditorL10n.Tr(scope, key, args)`）、そうでなければ key 先頭型
+    （各製品の `XxxL10n.Tr(key, args)`）と解釈する。
+    """
+    facades: dict[str, L10nFacade] = {}
+    for rel, content in (sources if sources is not None else _l10n_source_files(ctx)):
+        for match in L10N_TR_DECL_RE.finditer(content):
+            class_name = _enclosing_class(content, match.start())
+            if not class_name or class_name in facades:
+                continue
+            params = [part.strip() for part in match.group("params").split(",") if part.strip()]
+            first_name = params[0].split()[-1].lstrip("@") if params else ""
+            key_index = 1 if first_name == "scope" else 0
+            scope_match = re.search(
+                r"const\s+string\s+Scope\s*=\s*\"(?P<value>[^\"]*)\"\s*;", content)
+            facades[class_name] = L10nFacade(
+                class_name=class_name,
+                key_index=key_index,
+                scope=scope_match.group("value") if scope_match else None,
+                declared_in=rel,
+            )
+    return sorted(facades.values(), key=lambda facade: facade.class_name)
+
+
+def _l10n_find_calls(content: str, needle: str) -> list[tuple[int, str]]:
+    """`Class.Tr(` の各出現について (行番号, 引数文字列) を返す（括弧・文字列リテラルを考慮）。"""
+    results: list[tuple[int, str]] = []
+    start = 0
+    while True:
+        index = content.find(needle, start)
+        if index == -1:
+            return results
+        if index > 0 and (content[index - 1].isalnum() or content[index - 1] in "._"):
+            start = index + 1  # `XxxEpeL10n.Tr` のような部分一致を除く
+            continue
+        depth, in_string, escaped = 0, False, False
+        for position in range(index + len(needle) - 1, len(content)):
+            char = content[position]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    results.append((content.count("\n", 0, index) + 1,
+                                    content[index + len(needle):position]))
+                    start = position + 1
+                    break
+        else:
+            return results
+
+
+def _l10n_split_args(text: str) -> list[str]:
+    """トップレベルのカンマで引数を分割する（入れ子の括弧と文字列リテラルは無視する）。"""
+    args: list[str] = []
+    depth, in_string, escaped = 0, False, False
+    current: list[str] = []
+    for char in text:
+        if in_string:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            current.append(char)
+        elif char in "([{":
+            depth += 1
+            current.append(char)
+        elif char in ")]}":
+            depth -= 1
+            current.append(char)
+        elif char == "," and depth == 0:
+            args.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    tail = "".join(current).strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def check_21_l10n_key_coverage(ctx: RepoContext) -> None:
+    tables = collect_l10n_default_tables(ctx)
+    if not tables:
+        return  # 翻訳カタログを持たないリポジトリでは何も言わない（検査 18 と同じ方針）
+    sources = _l10n_source_files(ctx)
+    if not sources:
+        return
+    by_scope = {table.scope: table for table in tables}
+    # scope を 1 つしか持たないリポジトリでは、どのキーもその scope の話でしかない。
+    # 複数 scope（本体＋ Samples~ など）では、どの scope に属すかを静的に決められない宣言が
+    # あるため「どれか 1 つに在れば良い」で判定する。取りこぼす側（別 scope に在るキーを
+    # 正しいとみなす）へ倒すのは、誤検出で検査ごと無効化されるより軽いと判断した。
+    all_keys: set[str] = set()
+    for table in tables:
+        all_keys |= set(table.entries)
+
+    def known(key: str, scope: str | None) -> bool:
+        table = by_scope.get(scope or "")
+        return key in table.entries if table else key in all_keys
+
+    scope_label = tables[0].scope if len(tables) == 1 else "全 scope"
+
+    # --- ① TextKey クラスが宣言するキー（出荷コードが参照するか否かに関わらず全件） -------
+    for rel, content in sources:
+        for class_match in L10N_TEXTKEY_CLASS_RE.finditer(content):
+            class_name = class_match.group("name")
+            if ctx.is_waived("21", class_name):
+                continue
+            body = _class_body(content, class_match.end())
+            declared = [(match.group("name"), match.group("value"))
+                        for match in L10N_CONST_RE.finditer(body)]
+            if not declared:
+                ctx.add(
+                    "21",
+                    ERROR,
+                    f"`{class_name}` から翻訳キーの宣言を 1 件も拾えていません。クラスは在るのに"
+                    f"0 件という状態は、宣言の書き方が変わって**この検査が何も見ていない**ことを"
+                    f"意味します（0 件のまま緑になるのが一番危ない）。宣言の形を戻すか、"
+                    f"検査側の抽出規則を合わせてください",
+                    rel,
+                )
+                continue
+            # 指摘には定数名とキー文字列の**両方**を出す。定数名だけではカタログ側で検索できず、
+            # キーだけではコード側で検索できないので、片方だけだと必ず往復が要る。
+            missing = sorted(
+                f'{name}="{value}"'
+                for name, value in declared
+                if not known(value, None) and not ctx.is_waived("21", value)
+            )
+            if missing:
+                ctx.add(
+                    "21",
+                    ERROR,
+                    f"`{class_name}` が宣言する翻訳キーのうち {len(missing)} 件が既定ロケールの"
+                    f"カタログ（{scope_label}）にありません（{_l10n_sample(missing)}）。"
+                    f"`Tr` は未登録のキーを**キー文字列のまま返し、書式引数を捨てる**ため、"
+                    f"訳が出ないのではなく画面にキー名が出て埋め込むはずの値ごと消えます。"
+                    f"全ロケールが等しく欠いていると検査 18 では構造上鳴りません",
+                    rel,
+                )
+
+    # --- ② `Tr` 呼び出しが参照するキー（文字列リテラル・定数のどちらも） ------------------
+    consts: dict[str, str] = {}
+    for _, content in sources:
+        for match in L10N_CONST_RE.finditer(content):
+            consts[match.group("name")] = match.group("value")
+
+    facades = collect_l10n_facades(ctx, sources)
+    calls = resolved = 0
+    for facade in facades:
+        needle = f"{facade.class_name}.Tr("
+        for rel, content in sources:
+            for line, argtext in _l10n_find_calls(content, needle):
+                args = _l10n_split_args(argtext)
+                if len(args) <= facade.key_index:
+                    continue
+                calls += 1
+                scope = facade.scope
+                if facade.key_index == 1:
+                    scope_arg = args[0]
+                    if scope_arg.startswith('"') and scope_arg.endswith('"'):
+                        scope = scope_arg[1:-1]
+                    else:
+                        scope = consts.get(scope_arg.split(".")[-1].strip(), facade.scope)
+                raw = args[facade.key_index]
+                if raw.startswith('"') and raw.endswith('"'):
+                    key = raw[1:-1]
+                else:
+                    key = consts.get(raw.split(".")[-1].strip())
+                    if key is None:
+                        if L10N_KEY_CONST_REF_RE.match(raw) and not ctx.is_waived("21", rel):
+                            ctx.add(
+                                "21",
+                                ERROR,
+                                f"{rel}:{line}: 翻訳キー定数 `{raw}` を解決できません。定数の宣言が"
+                                f"git 追跡された `Packages/` の外にあるか、消えています。"
+                                f"解決できない呼び出しは検査から黙って抜けます",
+                                rel,
+                            )
+                        continue  # 変数で組み立てるキーは静的に決まらない（正当な形）
+                resolved += 1
+                if not known(key, scope) and not ctx.is_waived("21", key):
+                    ctx.add(
+                        "21",
+                        ERROR,
+                        f"{rel}:{line}: `{facade.class_name}.Tr` が参照するキー `{key}` が既定"
+                        f"ロケールのカタログ（{scope or scope_label}）にありません。画面には訳文の"
+                        f"代わりにキー名が出ます",
+                        rel,
+                    )
+
+    # 「呼び出しは在るのに 1 件も解決できなかった」を成功として返さない。検査 0 件の緑と、
+    # 検査して問題が無かった緑が見分けられないと、この検査は在るだけで何も守らない。
+    if calls > 0 and resolved == 0:
+        ctx.add(
+            "21",
+            ERROR,
+            f"`Tr` の呼び出しを {calls} 件検出しましたが、キーを 1 つも解決できていません"
+            f"（ファサード: {', '.join(facade.class_name for facade in facades) or 'なし'}）。"
+            f"この状態の緑は「問題が無い」ではなく「何も見ていない」です",
+        )
+
+
+def _class_body(content: str, position: int) -> str:
+    """`class X` 宣言の直後から、対応する閉じ波括弧までの本文を返す。
+
+    ファイル単位で定数を拾うと、同じファイルに翻訳キー以外の定数を持つクラスが同居していた
+    場合にそれらまで「カタログに無いキー」と誤検出する。クラスの境界で切る。
+    """
+    start = content.find("{", position)
+    if start == -1:
+        return ""
+    depth = 0
+    for index in range(start, len(content)):
+        if content[index] == "{":
+            depth += 1
+        elif content[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start + 1:index]
+    return content[start + 1:]
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -2888,6 +3357,7 @@ CHECKS = (
     check_18_l10n_catalogs,
     check_19_translation_doc_naming,
     check_20_skills_under_version_control,
+    check_21_l10n_key_coverage,
     check_extra,
 )
 
@@ -2897,6 +3367,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--root", default=".", help="対象リポジトリのルート（既定: カレント）")
     parser.add_argument("--strict", action="store_true", help="warn も失敗として扱う")
     parser.add_argument("--json", action="store_true", help="結果を JSON で出力する")
+    parser.add_argument(
+        "--separate-untracked",
+        action="store_true",
+        help=(
+            "未追跡ファイル起因の指摘を別枠へ分け、集計と終了コードから外す"
+            "（並行作業の置き土産と自分の変更を切り分ける。指摘自体は消さず必ず表示する）"
+        ),
+    )
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve()
@@ -2908,31 +3386,62 @@ def main(argv: list[str]) -> int:
     for check in CHECKS:
         check(ctx)
 
-    errors = [f for f in ctx.findings if f.severity == ERROR]
-    warnings = [f for f in ctx.findings if f.severity == WARN]
+    # 既定では分離しない（`untracked` の印は付いていても集計は従来どおり）。
+    # フラグを付けたときだけ 2 つの欄へ分け、終了コードは前者だけで決める。
+    if args.separate_untracked:
+        findings, untracked_findings = split_untracked(ctx.findings)
+    else:
+        findings, untracked_findings = ctx.findings, []
+
+    errors = [f for f in findings if f.severity == ERROR]
+    warnings = [f for f in findings if f.severity == WARN]
 
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "root": str(root),
-                    "role": ctx.role,
-                    "packages": [name for name, _, _ in ctx.packages],
-                    "errors": [f.__dict__ for f in errors],
-                    "warnings": [f.__dict__ for f in warnings],
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        payload = {
+            "root": str(root),
+            "role": ctx.role,
+            "packages": [name for name, _, _ in ctx.packages],
+            "errors": [finding_payload(f) for f in errors],
+            "warnings": [finding_payload(f) for f in warnings],
+        }
+        if args.separate_untracked:
+            # 頼まれたときだけ欄を足す（既定の JSON の形は 1 キーも変えない）
+            payload["untrackedErrors"] = [
+                finding_payload(f) for f in untracked_findings if f.severity == ERROR
+            ]
+            payload["untrackedWarnings"] = [
+                finding_payload(f) for f in untracked_findings if f.severity == WARN
+            ]
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         label = ctx.config.get("repository") or root.name
         print(f"== 標準準拠検査: {label}（role={ctx.role}, packages={len(ctx.packages)}）")
-        for line in collapse_findings(ctx.findings):
+        for line in collapse_findings(findings):
             print(line)
-        if not ctx.findings:
-            print("問題は見つかりませんでした。")
-        print(f"-- error {len(errors)} 件 / warn {len(warnings)} 件")
+        if not findings:
+            # 下に別枠が続くときに「問題は見つかりませんでした。」だけを出すと嘘になる
+            print("別枠のもの以外に問題は見つかりませんでした。" if untracked_findings else "問題は見つかりませんでした。")
+        summary = f"-- error {len(errors)} 件 / warn {len(warnings)} 件"
+        if untracked_findings:
+            # 「error 0 件」だけを切り取って読まれないよう、同じ行に分離した件数を必ず添える
+            summary += f"（別枠: 未追跡ファイル起因 {len(untracked_findings)} 件）"
+        print(summary)
+        if untracked_findings:
+            print("")
+            print(
+                f"== 未追跡ファイル起因 {len(untracked_findings)} 件"
+                "（git がまだ知らないファイルが原因。上の集計と終了コードには含めていません）"
+            )
+            for line in collapse_findings(untracked_findings):
+                print(line)
+            print(
+                "-- 自分が置いたファイルなら `git add -N <path>`（intent-to-add）してから検査し直してください"
+                "（上の集計へ戻ります）。"
+            )
+            print(
+                "   残る分は他の作業が置いたファイルです。**この欄が空でないリポジトリはリリースできません**"
+                "（利用者側でだけ壊れます）。分離は自分の変更を切り分けるためのもので、消してよい理由ではありません。"
+            )
 
     if errors:
         return 1

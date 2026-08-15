@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: c6cc3bc133516e9da3c3ef5547d0e3a65d36a7b91b104445ff57b4398ac22c34
+# source-sha256: f7bd90ce33cc8658f03ebdb5e48ad07c80ab9e85bd1e4294ba64976e874f48e7
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -141,7 +141,7 @@ KNOWN_CONFIG_KEYS = frozenset({
 
 VALID_CHECK_IDS = {
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "+",
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "+",
 }
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
@@ -1532,6 +1532,22 @@ def _last_commit(root: Path, *paths: str) -> tuple[int, str] | None:
     return int(output[0]), output[1]
 
 
+def _newest_labeled_commit(
+    root: Path, sources: list[tuple[str, list[str]]]
+) -> tuple[int, str, str] | None:
+    """`(ラベル, パス群)` の並びから最新のコミットを `(epoch, YYYY-MM-DD, ラベル)` で返す。
+
+    検査 15 と検査 23 が**同じ「UI がいつ変わったか」を答える**ようにするための共有部品。
+    別々に書くと、片方だけ参照先を足したときに 2 つの検査が違う日付を主張し始める。
+    """
+    newest: tuple[int, str, str] | None = None
+    for label, paths in sources:
+        commit = _last_commit(root, *paths)
+        if commit and (newest is None or commit[0] > newest[0]):
+            newest = (commit[0], commit[1], label)
+    return newest
+
+
 def _worktree_dirty_paths(root: Path) -> set[str]:
     """作業ツリーで変更・追加されているパス（git 未追跡も含む）。"""
     result: set[str] = set()
@@ -1588,11 +1604,7 @@ def check_15_stale_screenshots(ctx: RepoContext) -> None:
         if locale_paths:
             sources.append(("翻訳カタログ", locale_paths))
 
-        newest: tuple[int, str, str] | None = None
-        for label, paths in sources:
-            commit = _last_commit(ctx.root, *paths)
-            if commit and (newest is None or commit[0] > newest[0]):
-                newest = (commit[0], commit[1], label)
+        newest = _newest_labeled_commit(ctx.root, sources)
         if newest is None:
             continue  # UI 側の履歴が読めない（git が無い・浅い clone）なら何も言わない
 
@@ -1612,8 +1624,8 @@ def check_15_stale_screenshots(ctx: RepoContext) -> None:
                 f"信じます。画像は文言を grep しても出てこない唯一のサーフェスなので、UI を直しても"
                 f"取り残されます。開いて現行 UI と見比べ、違っていれば撮り直してください。"
                 f"**同じ構図のコピーは商品ページ（external-content/products/<slug>/assets/）と"
-                f"出品プラットフォームにもあり、そちらはこの検査の対象外です**。3 面まとめて見直してください"
-                f"（GOLD_STANDARD §2.5・§2.10）",
+                f"出品用（同 publish-assets/）にもあります**。そちらは検査 23 が別に見ますが、"
+                f"面ごとの粗い判定なので、3 面まとめて見直してください（GOLD_STANDARD §2.5・§2.10）",
                 rel,
             )
 
@@ -3234,6 +3246,558 @@ def _class_body(content: str, position: int) -> str:
     return content[start + 1:]
 
 
+# ---------------------------------------------------------------------------
+# 検査 22: 販売単位の宣言が、レジストリとリポジトリで一致していること（2026-08-15 制定）
+#
+# 「この商品が何を配るか」は **2 か所**に書いてある。
+#   (1) リポジトリ側 `pipeline/repo.json` の `productSlug` と `saleUnit`
+#   (2) レジストリ側 MySite `pipeline/repositories.json` の当該リポジトリの `products[]`
+# 同じ事実が 2 つの器を持つ形なので、片方だけ直すと**どちらを信じてよいか分からなくなる**。
+#
+# 実際に踏んだ（2026-08-15 検出）: 有料 4 製品を VPM で配らない方針にしたとき、各リポジトリの
+# `saleUnit.distribution` からは `vpm-zip` を外したのに、レジストリ側には残ったままだった。
+# どの検査も見ておらず、人間のレビューで偶然見つかった。配布種別はリリースの成果物集合そのもの
+# （設計 §4「成果物集合は `saleUnit.distribution × saleUnit.packages` から**先に**構成する」）
+# なので、食い違ったまま気づかないと「何を出して何を出さないか」が決められなくなる。
+#
+# **突き合わせるのはレジストリが持つキーだけ**にする。`saleUnit` にはほかに `versionPolicy` /
+# `primaryPackage` / `exporterAssets` / `displayName` があるが、レジストリに対応物が無い。
+# レジストリが知っているのは「どのリポジトリがどの商品を持ち、その商品が何パッケージを
+# どの形式で配るか」までで、版の揃え方や書き出し設定アセットはリポジトリ固有の実装詳細である。
+# 片側にしか無い宣言は二重管理ではないので、比較の対象にしない。
+#
+# とくに `displayName` は **両方に同名のキーがあるが意味が違う**ので比較してはいけない。
+# レジストリのそれは*リポジトリ*の表示名（例 `TechBook_GenerativeProgramming1`）で、
+# `saleUnit.displayName` は*販売単位*の名前（例 `GenerativeProgramming1`）である。実データで
+# 現に食い違っており、名前が同じというだけで比べると正しい宣言を落とす。
+#
+# レジストリを解決できない環境（他人の clone・最小構成の CI）では **黙らない**。検査 10・20 と
+# 同じく「未確認である」と warn で言い残す。ここで沈黙すると「突き合わせた結果の緑」と
+# 「突き合わせていない緑」が区別できなくなる。一方で error へは格上げしない
+# ——レジストリは道案内であって検証の前提ではない（設計 §5）。
+#
+# waiver の target には比較するキー名（`slug` / `packages` / `distribution` / `products`）を書く。
+# ---------------------------------------------------------------------------
+
+
+def _registry_entry_for(ctx: RepoContext, registry: dict, origin: str) -> dict | None:
+    """レジストリからこのリポジトリの項目を引く（見つからなければ None）。
+
+    同一性の判定は `resolve_registry_repos()` の逆向きで、**remote の URL** を第一の鍵にする。
+    ローカルパスや表示名と違い、clone 先・マシン・worktree に依らないため。URL の書き方が
+    レジストリの `https` / `ssh` のどちらとも揃っていない場合だけ、`pipeline/repo.json` の
+    `repository` と `displayName` の一致へ落とす。
+    """
+    entries = [item for item in registry.get("repositories", []) if isinstance(item, dict)]
+
+    # 同じ remote を指す項目が 2 つあると、先頭だけを見て 2 件目の宣言が誰とも突き合わされない。
+    # この検査が塞ごうとしている「二重宣言の食い違い」と同じ型の穴なので、重複自体を error にする。
+    matches = [
+        entry
+        for entry in entries
+        if origin in ({(entry.get("remote") or {}).get("https"), (entry.get("remote") or {}).get("ssh")} - {None})
+        if isinstance(entry.get("remote"), dict)
+    ]
+    if len(matches) > 1:
+        if not ctx.is_waived("22", "products"):
+            ctx.add(
+                "22",
+                ERROR,
+                f"MySite のレジストリに、同じ remote（`{origin}`）を指す項目が {len(matches)} 件あります。"
+                "1 つのリポジトリに複数の項目があると、突き合わせは先頭の 1 件しか見ないため、"
+                "2 件目以降の宣言は誰とも照合されないまま黙って通ります"
+                "（MySite pipeline/repositories.json の重複を 1 つへまとめてください）",
+                str(ctx.config_path.relative_to(ctx.root)) if hasattr(ctx, "config_path") else "pipeline/repo.json",
+            )
+        return matches[0]
+    if matches:
+        return matches[0]
+
+    label = str(ctx.config.get("repository") or "").strip()
+    if label:
+        for entry in entries:
+            if str(entry.get("displayName") or "") == label:
+                return entry
+    return None
+
+
+def _declaration_diff(registry_values: list[str], own_values: list[str]) -> str:
+    """食い違いの中身を「どちら側にだけあるか」で述べる（順序の違いは差分にしない）。"""
+    only_registry = sorted(set(registry_values) - set(own_values))
+    only_own = sorted(set(own_values) - set(registry_values))
+    parts = []
+    if only_registry:
+        parts.append(f"レジストリにだけある: {', '.join(only_registry)}")
+    if only_own:
+        parts.append(f"repo.json にだけある: {', '.join(only_own)}")
+    if not parts:
+        # 集合としては同じで、片方に同じ値が 2 回書いてある場合（打ち間違い）
+        parts.append("値の重複が違います")
+    return "・".join(parts)
+
+
+def check_22_registry_sale_unit(ctx: RepoContext) -> None:
+    config_sale_unit = ctx.config.get("saleUnit")
+    sale_unit = config_sale_unit if isinstance(config_sale_unit, dict) else None
+    slug = str(ctx.config.get("productSlug") or "").strip()
+    config_rel = "pipeline/repo.json"
+
+    # 身元を名乗れないチェックアウト（origin remote が無い）では何も主張しない。
+    # レジストリの項目と結び付ける鍵が remote の URL なので、鍵が無ければ「登録されていない」のか
+    # 「照合できていない」のかを区別できない。どこへも push できないチェックアウトでもあるので、
+    # 二重宣言が食い違ったまま外へ出る経路自体が無い（検査 10・15・17 と同じ
+    # 「証拠が無いときは何も主張しない」）。
+    origin = run_git(ctx.root, "remote", "get-url", "origin").strip()
+    if not origin:
+        return
+
+    site_root = resolve_site_repo(ctx)
+    registry = load_json(site_root / "pipeline" / "repositories.json") if site_root else None
+    if registry is None:
+        if sale_unit:
+            ctx.add(
+                "22",
+                WARN,
+                "MySite のレジストリ（pipeline/repositories.json）を解決できないため、"
+                "販売単位の宣言を突き合わせていません（**未確認**であって一致の確認ではありません）。"
+                "同じ宣言が repo.json とレジストリの 2 か所にあり、片方だけ直すと"
+                "どちらを信じてよいか分からなくなります。手元で確かめるには "
+                "PIPELINE_SITE_REPO に MySite のチェックアウトを指すか、"
+                "~/.kajitaharuka-pipeline.json の overrides.mysite を設定してください",
+                config_rel,
+            )
+        return
+
+    entry = _registry_entry_for(ctx, registry, origin)
+    if entry is None:
+        if sale_unit:
+            ctx.add(
+                "22",
+                WARN,
+                "MySite のレジストリにこのリポジトリの項目が見つからないため、販売単位の宣言を"
+                f"突き合わせていません（**未確認**。origin `{origin}` とも repository 名とも"
+                "一致する項目がありません）。"
+                "パイプラインに乗っているリポジトリならレジストリへ登録してください"
+                "（GOLD_STANDARD §2.10・登録が無いと横断検査が丸ごと空振りします）",
+                config_rel,
+            )
+        return
+
+    raw_products = entry.get("products")
+    # 「キーが無い」と「キーはあるが形が違う」を混ぜない。混ぜると「products を足してください」と
+    # 案内してしまい、実際には配列でない値が入っているだけ、という取り違えを生む。
+    if raw_products is not None and not isinstance(raw_products, list):
+        if not ctx.is_waived("22", "products"):
+            ctx.add(
+                "22",
+                ERROR,
+                "レジストリの当該リポジトリの products が配列ではありません"
+                f"（{type(raw_products).__name__}）。この検査は products を商品の配列として読むため、"
+                "形が違うと 1 件も突き合わせられません（MySite pipeline/repositories.json を直してください）",
+                config_rel,
+            )
+        return
+    products = [item for item in (raw_products or []) if isinstance(item, dict)]
+
+    # --- 22-a: 「商品を持つ」という宣言自体が両側で揃っているか -----------------
+    if sale_unit is None:
+        if products and not ctx.is_waived("22", "products"):
+            slugs = ", ".join(str(item.get("slug") or "(slug 未設定)") for item in products)
+            ctx.add(
+                "22",
+                ERROR,
+                f"レジストリはこのリポジトリが商品（{slugs}）を持つと宣言していますが、"
+                f"pipeline/repo.json に saleUnit がありません。販売単位の宣言が 2 か所にあって"
+                f"片側しか無い状態では、リリースの成果物集合をどちらから組み立てるべきか決まりません。"
+                f"商品を持つなら saleUnit を書き、持たないならレジストリの products を消してください",
+                config_rel,
+            )
+        return
+
+    # productSlug が無い repo.json は検査 0 が error で言う。突き合わせる鍵そのものが無いので、
+    # ここから先は何も言わない（同じ壊れ方を 2 か所から報告しても直す手がかりが増えない）
+    if not slug:
+        return
+
+    if not products:
+        if not ctx.is_waived("22", "products"):
+            ctx.add(
+                "22",
+                ERROR,
+                f"pipeline/repo.json は販売単位（{slug}）を宣言していますが、"
+                f"レジストリの当該リポジトリに products がありません。レジストリは"
+                f"「どのリポジトリがどの商品を持つか」の正本なので、載っていない商品は"
+                f"横断検査からも商品情報の突き合わせからも構造的に漏れます"
+                f"（MySite pipeline/repositories.json に products を足してください）",
+                config_rel,
+            )
+        return
+
+
+    matched = [item for item in products if str(item.get("slug") or "") == slug]
+    if not matched:
+        if not ctx.is_waived("22", "slug"):
+            listed = ", ".join(str(item.get("slug") or "(slug 未設定)") for item in products)
+            ctx.add(
+                "22",
+                ERROR,
+                f"pipeline/repo.json の productSlug（{slug}）に対応する商品がレジストリにありません"
+                f"（レジストリ側の slug: {listed}）。slug は商品ページ・package.json の URL・"
+                f"契約ファイルの置き場所をすべて決める鍵なので、2 か所で違う名前を名乗ると"
+                f"どちらの経路も相手を見つけられなくなります",
+                config_rel,
+            )
+        return
+
+    # repo.json は販売単位を 1 つしか表現できない（productSlug + saleUnit が各 1 個）。
+    # レジストリだけが 2 つ目を持っていると、その商品は**どのリポジトリの宣言とも突き合わされない**
+    if len(products) > 1 and not ctx.is_waived("22", "products"):
+        others = ", ".join(
+            str(item.get("slug") or "(slug 未設定)") for item in products if item is not matched[0]
+        )
+        ctx.add(
+            "22",
+            ERROR,
+            f"レジストリがこのリポジトリに複数の商品を宣言していますが（{slug} のほかに {others}）、"
+            f"pipeline/repo.json は販売単位を 1 つしか表現できません（productSlug と saleUnit が各 1 個）。"
+            f"余分な商品は誰とも突き合わされないまま残ります。1 リポジトリ 1 商品へ戻すか、"
+            f"repo.json 側のスキーマを先に拡張してください",
+            config_rel,
+        )
+
+    # --- 22-b: レジストリが持つキーだけを突き合わせる ---------------------------
+    # 比較は**順序に依らない**。どちらの配列も「集合としての宣言」であって、並び順に
+    # 意味を与えている箇所は無い（並びを比べると正しい宣言まで落ちる）。一方 sorted 同士の
+    # 比較にすることで、片側にだけある重複（打ち間違い）は取りこぼさない。
+    registry_product = matched[0]
+    for key, label in (("packages", "パッケージ集合"), ("distribution", "配布種別")):
+        if ctx.is_waived("22", key):
+            continue
+        registry_raw = registry_product.get(key)
+        own_raw = sale_unit.get(key)
+        if not isinstance(registry_raw, list) or not isinstance(own_raw, list):
+            ctx.add(
+                "22",
+                ERROR,
+                f"販売単位の{label}（{key}）を比較できません。"
+                f"レジストリ側: {'配列' if isinstance(registry_raw, list) else '配列ではない/未宣言'}・"
+                f"repo.json 側: {'配列' if isinstance(own_raw, list) else '配列ではない/未宣言'}。"
+                f"どちらも文字列の配列で宣言してください",
+                config_rel,
+            )
+            continue
+        registry_values = [str(item) for item in registry_raw]
+        own_values = [str(item) for item in own_raw]
+        if sorted(registry_values) == sorted(own_values):
+            continue
+        ctx.add(
+            "22",
+            ERROR,
+            f"販売単位「{slug}」の{label}が、MySite のレジストリと pipeline/repo.json で"
+            f"食い違っています（{_declaration_diff(registry_values, own_values)}）。"
+            f"同じ事実が 2 か所に書かれていて値が違うと、**どちらを信じてよいか分からなくなります**。"
+            f"実際に、有料 4 製品を VPM で配らない方針にしたとき repo.json からだけ `vpm-zip` を外し、"
+            f"レジストリに残った宣言を誰も見ていませんでした（2026-08-15 検出）。"
+            f"{label}はリリースの成果物集合そのもの（設計 §4）なので、どちらが方針かを決めて"
+            f"両方を同時に直してください（レジストリ: MySite pipeline/repositories.json の "
+            f"repositories[].products[]・リポジトリ: pipeline/repo.json の saleUnit）",
+            config_rel,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 検査 23: 商品ページ・出品用の画像が実物と一致していること（2026-08-15 制定）
+#
+# 検査 15 は**同梱画像だけ**を見ており、「同じ構図は商品ページと出品プラットフォームにもあるが
+# そちらは対象外なので自分で開いて見比べろ」と書いてあった。人間の注意力に任せた結果、
+# 2026-08-15 に**同じ日のうちに 2 件**踏んだ:
+#   - TAE: カーブ Inspector のレイアウトを変えて同梱画像と商品ページは撮り直したのに、
+#     出品用 `publish-assets/` の 7 枚が旧レイアウトのまま残った（本コミット時点でも未修正）。
+#   - UMPD: Package Manager を写した 4 枚に旧版数（1.1.5 / 1.1.1 / 1.1.7）が焼き込まれたまま
+#     1.2.0 を出そうとした。うち 1 枚は Booth のギャラリー画像で版数が読める大きさだった。
+# どちらも人間が探して見つけた。**画像は grep で見つけられない唯一のサーフェス**なので、
+# 機械が「怪しい」と言うだけでも価値がある。
+#
+# **この機械には OCR（tesseract / pytesseract）が無く、画像の中の文字は読めない。**
+# したがって「その画像に何が写っているか」「版数が写り込んでいるか」は直接には判定できず、
+# 使えるのは検査 15 と同じ**コミット時刻の代理指標**だけである。時刻が古いことは
+# 「必ず間違い」を意味しない（UI に影響しないコード変更でも時刻は進む）。severity は warn に留め、
+# リリースを止めるのではなく「開いて見比べろ」を出す。
+#
+# 検査 15 と別番号にした理由:
+#   1. **報告の粒度が違う**。検査 15 は画像 1 枚ごとに言うが、こちらの UI 軸は**面ごと**に言う
+#      （後述）。同じ検査番号の指摘が、あるときは「この画像が古い」・あるときは「この面を
+#      誰も見直していない」を意味すると、出力も waiver も読めなくなる。
+#   2. **参照する git リポジトリが違う**。画像はサイトリポジトリ側にあり、UI の履歴は製品
+#      リポジトリ側にある。サイトを解決できない環境では丸ごと黙る前提が要る（検査 10・12・17 と同じ）。
+#   3. **waiver の名前空間が違う**（`Packages/...` と `products/<slug>/...`）。
+#
+# 【UI 軸をなぜ「面ごと」にするか】商品 1 つに画像は 30〜37 枚あり、`Editor/` はリリースの
+# たびに何らかの理由で動く。画像 1 枚ずつ「UI 変更より古いか」で鳴らすと**実測で 5 商品 156 枚が
+# 全部 warn になり**（2026-08-15 実測）、しかも撮り直さない限り永久に消えない。常時点灯する検査は
+# 包括 waiver で黙らされ、本命の事故ごと見えなくなる（検査 15 のコメントが警戒しているのと同じ失敗）。
+# そこで問いを変え、**「最後の UI 変更のあと、その面の画像を 1 枚でも撮り直したか」**を見る。
+# 1 枚でも触っていれば「人間がその変更を意識して画像を見た」とみなして黙り、1 枚も触っていなければ
+# 「誰も見ていない」として鳴らす。上の TAE の事故はまさに後者（`assets/` は撮り直したが
+# `publish-assets/` は 1 枚も触っていない）で、実測でこの形だけを拾えた。
+#
+# 【版数軸をなぜ画像ごとにするか】どの画像に版数が写るかは**ファイル名から絞れる**ので、
+# 面へ丸めずに 1 枚ずつ名指しできる（絞り込みの根拠は VERSION_BEARING_* のコメント）。
+#
+# 【24 時間の許容幅】画像と実装は**別リポジトリ**にあり、同じ作業でもどちらを先にコミットするかは
+# 決まっていない。実測で UMPD は画像（external-content）を先に、実装（製品リポジトリ）を
+# 9 分後にコミットしており、素朴な前後比較では正しい作業が誤検出になった。1 回の作業は 1 日に
+# 収まるので、24 時間以内の前後は「同じ作業」とみなす。
+# ---------------------------------------------------------------------------
+
+# サイト側で商品の画像を置く 2 つの面。表示名は指摘文でそのまま使う
+SITE_IMAGE_SURFACES = (("assets", "商品ページ"), ("publish-assets", "出品用"))
+
+# 別リポジトリへ分けてコミットした同一作業を前後関係のゆらぎで誤検出しないための幅
+CROSS_REPO_TOLERANCE_SECONDS = 24 * 60 * 60
+
+# 版数が焼き込まれる面 ＝「導入方法」の画面。Package Manager と VCC は必ずパッケージの版を
+# 画面へ出すので、版を上げた瞬間にその画像だけが古くなる。
+#
+# **どれを対象とみなすかは、5 商品の `install-*` 11 枚を実際に開いて決めた**（2026-08-15 実測）:
+#   版が写る:   install-package-manager.png（PM 本体の詳細欄）・install-samples.png（PM の
+#               Samples タブ）・install-vcc-add-package.png（VCC の Manage Packages 一覧）
+#   版が写らない: install-package-manager-add-menu.png（＋メニューだけ）・
+#               install-package-manager-git-url.png（URL 入力欄だけ）・
+#               install-create-menu.png・install-verify-tools-menu.png（メニューだけ）
+# 版が写らない側はすべて「メニュー」か「入力欄」の切り出しだったので、stem が `-menu` / `-url` で
+# 終わるものを除く規則にした。この規則で残る 4 枚のうち 3 枚が実際に旧版数を写しており
+# （TAE 1.2.6 / UEWCE 1.1.3 / UEL 1.2.0 に対し現行 2.0.4 / 1.2.0 / 1.3.4）、
+# 誤検出は install-vcc-manage-project.png の 1 枚だけだった（VCC のプロジェクト一覧に版は出ない）。
+VERSION_BEARING_IMAGE_PREFIX = "install-"
+VERSION_BEARING_EXCLUDED_SUFFIXES = ("-menu", "-url")
+
+# `version` の値が実際に変わったコミットを `git log -p` の差分から見分ける
+PACKAGE_VERSION_DIFF_RE = re.compile(r'^([-+])\s*"version"\s*:\s*"([^"]+)"')
+
+
+def _last_version_change(root: Path, rel: str) -> tuple[int, str, str] | None:
+    """`package.json` の `version` の**値が実際に変わった**最新コミットを返す。
+
+    `git log -1 -- package.json` では駄目で、依存・説明文・URL だけを直したコミットが大量に
+    混じる（実測では版を上げていないコミットのほうが多い）。`-p` の差分から version 行だけを
+    取り出し、除去側と追加側の値が違うコミットを最新から探す。新規作成は「無 → 1.0.0」の
+    変更として数える（最初の出荷でも画像は撮り直す必要があるため）。
+
+    戻り値は `(epoch, YYYY-MM-DD, "旧->新")`。履歴が読めなければ None（検査 15 と同じく、
+    git という証拠が無いときは何も主張しない）。
+    """
+    output = run_git(root, "log", "--format=%x00%ct %cs", "-p", "--", rel)
+    for chunk in output.split("\x00"):
+        head, _, body = chunk.partition("\n")
+        fields = head.split()
+        if len(fields) < 2 or not fields[0].isdigit():
+            continue
+        old = new = None
+        for line in body.splitlines():
+            match = PACKAGE_VERSION_DIFF_RE.match(line)
+            if not match:
+                continue
+            if match.group(1) == "-":
+                old = match.group(2)
+            else:
+                new = match.group(2)
+        if new is not None and new != old:
+            return int(fields[0]), fields[1], f"{old or '無'} → {new}"
+    return None
+
+
+def _last_commit_by_path(root: Path, *paths: str) -> dict[str, tuple[int, str]]:
+    """指定パス配下の各ファイルの最終コミットを `{パス: (epoch, YYYY-MM-DD)}` で返す。
+
+    1 枚ずつ `git log` を呼ぶと商品 1 つで 30〜37 プロセスを起こすことになるため、
+    `--name-only` の 1 回の走査で全部を拾う（実データ 37 枚で個別呼び出しと完全一致を確認）。
+    パス指定は**呼び出し先ディレクトリからの相対**で、`external-content` が単独リポジトリでも
+    親リポジトリの一部でも同じ書き方で通る（`git log` の pathspec は CWD 基準のため）。
+    """
+    result: dict[str, tuple[int, str]] = {}
+    epoch: int | None = None
+    date = ""
+    for line in run_git(root, "log", "--format=%x00%ct %cs", "--name-only", "--", *paths).splitlines():
+        if line.startswith("\x00"):
+            fields = line[1:].split()
+            epoch = int(fields[0]) if fields and fields[0].isdigit() else None
+            date = fields[1] if len(fields) > 1 else ""
+            continue
+        name = line.strip()
+        if name and epoch is not None:
+            result.setdefault(name, (epoch, date))
+    return result
+
+
+def _site_dirty_paths(site_repo: Path, *paths: str) -> set[str]:
+    """サイト側で変更中・未追跡のパス（撮り直しの最中とみなして判定から外す）。
+
+    `git status --porcelain` は**リポジトリルート基準**のパスを返すため、`external-content` が
+    親リポジトリの一部になっている構成では接頭辞がずれる。`ls-files` は CWD 基準なので、
+    どちらの構成でも同じ結果になる。
+    """
+    output = run_git(site_repo, "ls-files", "--modified", "--others", "--exclude-standard", "--", *paths)
+    return {line.strip() for line in output.splitlines() if line.strip()}
+
+
+def _product_ui_sources(ctx: RepoContext) -> list[tuple[str, list[str]]]:
+    """販売単位全体で「UI を決めるファイル」を束ねる（定義は検査 15 と同じ）。
+
+    翻訳カタログをリポジトリ全体から拾うのも検査 15 と同じ理由で、従属パッケージが自前の
+    カタログを持たず基盤側を引いている構成があるため。
+    """
+    sources: list[tuple[str, list[str]]] = []
+    for directory in UI_SOURCE_DIRS:
+        paths = [
+            f"{package_dir.relative_to(ctx.root).as_posix()}/{directory}"
+            for _, package_dir, _ in ctx.packages
+            if (package_dir / directory).is_dir()
+        ]
+        if paths:
+            sources.append((f"{directory}/", paths))
+    locale_paths = sorted(t for t in ctx.tracked if t.endswith(".json") and "/Locales/" in t)
+    if locale_paths:
+        sources.append(("翻訳カタログ", locale_paths))
+    return sources
+
+
+def _version_bearing_stems(assets_stems: list[str]) -> tuple[list[str], set[str]]:
+    """商品ページ側の stem から「版数が写る画像」と、その主題トークンを返す。"""
+    bearing = [
+        stem
+        for stem in assets_stems
+        if stem.startswith(VERSION_BEARING_IMAGE_PREFIX)
+        and not stem.endswith(VERSION_BEARING_EXCLUDED_SUFFIXES)
+    ]
+    # 出品用のファイル名は掲載枠（`booth-02-` / `uas-ss-01-` など）で始まり主題が後ろに付くため、
+    # `install-` の接頭辞では拾えない。商品ページ側で版数が写ると判定した画像の**主題**
+    # （`install-` を外した残り）を含む枠だけを、同じ画面の別コピーとみなす。
+    # 実測では UMPD の `booth-08-samples.png`（Booth のギャラリーで版数が読めた 1 枚）だけが
+    # これで拾え、ほかの商品では 1 枚も増えなかった。
+    # 空の主題（stem がちょうど `install-`）は落とす。空文字はどの名前にも含まれるため、
+    # そのまま使うと出品用の全コマを版数軸へ巻き込む
+    topics = {stem[len(VERSION_BEARING_IMAGE_PREFIX) :] for stem in bearing}
+    return bearing, {topic for topic in topics if topic}
+
+
+def check_23_stale_product_page_images(ctx: RepoContext) -> None:
+    """検査 23「商品ページ・出品用の画像と実物の一致」。検査 15 の関心を店頭の面へ広げたもの。"""
+    if not ctx.packages:
+        return
+    slug = str(ctx.config.get("productSlug") or "").strip()
+    product_dir = _site_product_dir(ctx)
+    if not slug or product_dir is None:
+        return  # サイトを解決できない環境では何も主張しない（検査 10・12・17 と同じ流儀）
+    site_repo = product_dir.parents[1]  # <site>/external-content
+
+    surface_paths = [f"products/{slug}/{directory}" for directory, _ in SITE_IMAGE_SURFACES]
+    tracked = [
+        line.strip()
+        for line in run_git(site_repo, "ls-files", "--", *surface_paths).splitlines()
+        if line.strip().lower().endswith(IMAGE_SUFFIXES)
+    ]
+    # SVG を対象にしないのは、**テキストなので文言を grep できる**ため。検査 15・23 の存在理由は
+    # 「画像だけが grep に掛からない」ことなので、検索で見つかる図版はここで鳴らす意味がない
+    # （EPE の `unitypackage-layouts.*.svg` 19 枚が該当）。IMAGE_SUFFIXES が既にそうなっている。
+    if not tracked:
+        return
+
+    commits = _last_commit_by_path(site_repo, *surface_paths)
+    dirty = _site_dirty_paths(site_repo, *surface_paths)
+    ui = _newest_labeled_commit(ctx.root, _product_ui_sources(ctx))
+
+    # スイートは版を揃える規約（検査 13）なので、どのパッケージで上げても同じ版になる。
+    # 万一ずれていても「いちばん新しい版上げ」を基準にすれば、撮り直しの要否は変わらない
+    version_changes = [
+        change
+        for change in (
+            _last_version_change(ctx.root, (package_dir / "package.json").relative_to(ctx.root).as_posix())
+            for _, package_dir, _ in ctx.packages
+        )
+        if change is not None
+    ]
+    version_change = max(version_changes, key=lambda item: item[0], default=None)
+
+    by_surface: dict[str, list[str]] = {directory: [] for directory, _ in SITE_IMAGE_SURFACES}
+    for rel in tracked:
+        directory = rel.split("/")[2] if rel.count("/") >= 3 else ""
+        if directory in by_surface:
+            by_surface[directory].append(rel)
+
+    # --- 23-a: UI を変えたのに、その面の画像を 1 枚も撮り直していない -----------
+    if ui is not None:
+        ui_epoch, ui_date, ui_label = ui
+        for directory, surface_label in SITE_IMAGE_SURFACES:
+            images = [rel for rel in by_surface[directory] if not ctx.is_waived("23", rel)]
+            target = f"products/{slug}/{directory}"
+            if not images or ctx.is_waived("23", target):
+                continue
+            if any(rel in dirty for rel in images):
+                continue  # 撮り直しの最中とみなす
+            newest = max(
+                (commits[rel] for rel in images if rel in commits),
+                key=lambda item: item[0],
+                default=None,
+            )
+            if newest is None or newest[0] + CROSS_REPO_TOLERANCE_SECONDS >= ui_epoch:
+                continue
+            ctx.add(
+                "23",
+                WARN,
+                f"{surface_label}の画像を、最後の UI 変更（{ui_date} に {ui_label} を変更）以後に"
+                f"1 枚も撮り直していません（{len(images)} 枚あり、いちばん新しいものが {newest[1]}）。"
+                f"画像は文言を grep しても出てこない唯一のサーフェスなので、UI を直しても取り残されます。"
+                f"実際に TAE で、カーブ Inspector のレイアウト変更を同梱画像と商品ページには反映したのに、"
+                f"出品用の 7 枚が旧レイアウトのまま残りました（2026-08-15 検出）。"
+                f"**この検査は画像の中身を読めません**（OCR を持たないため、判定はコミット時刻という"
+                f"代理指標だけです）。古いことが必ず間違いを意味するわけではないので、"
+                f"開いて現行 UI と見比べ、違っていれば撮り直してください。同じ構図は同梱・商品ページ・"
+                f"出品用の 3 面にあります（GOLD_STANDARD §2.5・§2.10）",
+                target,
+            )
+
+    # --- 23-b: 版数が写る画像が、版数を上げたコミットより古い -------------------
+    if version_change is None:
+        return
+    version_epoch, version_date, version_label = version_change
+
+    assets_stems = [rel.rsplit("/", 1)[-1].rsplit(".", 1)[0] for rel in by_surface["assets"]]
+    bearing_stems, topics = _version_bearing_stems(assets_stems)
+    if not bearing_stems:
+        return
+
+    suspects = [
+        rel
+        for rel in by_surface["assets"]
+        if rel.rsplit("/", 1)[-1].rsplit(".", 1)[0] in set(bearing_stems)
+    ] + [
+        rel
+        for rel in by_surface["publish-assets"]
+        if any(topic in rel.rsplit("/", 1)[-1].rsplit(".", 1)[0] for topic in topics)
+    ]
+
+    for rel in suspects:
+        if ctx.is_waived("23", rel) or rel in dirty:
+            continue
+        commit = commits.get(rel)
+        if commit is None or commit[0] + CROSS_REPO_TOLERANCE_SECONDS >= version_epoch:
+            continue
+        ctx.add(
+            "23",
+            WARN,
+            f"導入方法の画面を写した画像が、版数を {version_label} へ上げたコミット"
+            f"（{version_date}）より古いままです（画像は {commit[1]}）。"
+            f"Package Manager と VCC は画面にパッケージの版を出すので、版を上げると"
+            f"**画像の中の版数だけが古くなります**。実際に UMPD 1.2.0 で 4 枚に旧版数"
+            f"（1.1.5 / 1.1.1 / 1.1.7）が焼き込まれたまま出荷寸前まで進み、うち 1 枚は"
+            f"Booth のギャラリー画像で読める大きさでした（2026-08-15 検出）。"
+            f"**この検査は画像の中の文字を読めません**（OCR を持たないため、版数が実際に"
+            f"写っているかは判定していません）。開いて確かめ、版数が写っていれば撮り直してください",
+            rel,
+        )
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -3358,6 +3922,8 @@ CHECKS = (
     check_19_translation_doc_naming,
     check_20_skills_under_version_control,
     check_21_l10n_key_coverage,
+    check_22_registry_sale_unit,
+    check_23_stale_product_page_images,
     check_extra,
 )
 

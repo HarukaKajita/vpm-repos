@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: f7bd90ce33cc8658f03ebdb5e48ad07c80ab9e85bd1e4294ba64976e874f48e7
+# source-sha256: c281cbf75780418a768f0b77c7bf6d358a1fe7f84c08a71129e172f8e1aeef43
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -141,7 +141,7 @@ KNOWN_CONFIG_KEYS = frozenset({
 
 VALID_CHECK_IDS = {
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "+",
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "+",
 }
 VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
@@ -3798,6 +3798,462 @@ def check_23_stale_product_page_images(ctx: RepoContext) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# 検査 24: 動作確認済み環境の面間整合（2026-08-15 制定）
+#
+# 「どの環境で動かして確かめたか」は、**同じ商品の 4 つの面**に別々に手書きされる。
+#   (1) パッケージ同梱の `README.md` — 購入者が最初に読む文書。**同梱物なので実物に一番近い**
+#   (2) `package.json` の `description` — Package Manager の説明欄にそのまま出る
+#   (3) サイトの `publish.json` の `descriptionInput.requirements` — 出品フォームへ入る
+#   (4) サイトの `descriptions/{ja,en}.md` — 販売プラットフォームへそのまま投入される本文
+#   (5) サイトの `promo-kit/data/<slug をハイフン無しにした名前>.json` — **ここから画像が生成される**
+# 片方だけ直すと、購入者は同じ商品について違うことを言われ、**どちらが本当かを確かめる手段が無い**。
+# 対応環境は EULA 第 10 条で保証範囲に紐づいた契約の内容（検査 17）でもある。にもかかわらず、
+# 検査 17 が照合するのは `unity` + `unityRelease` の**版だけ**で **OS は対象外**だった。
+# **画像と違って文字列なので grep できる**面なのに、機械が一度も突き合わせていなかった。
+#
+# 実際に踏んだ事故（どちらも 2026-08-15 検出）:
+#   - **UEWCE 1.2.0**: Windows 11 での実測を済ませ、同梱 `README.md` と商品ページを
+#     「Unity 2022.3.22f1 / macOS / Windows 11」へ更新したのに、**`package.json` の `description`
+#     だけが `macOS` 単独のまま出荷された**。
+#   - **EPE / UEL / UEWCE の promo-kit**: 商品ページの本文と `publish.json` を Windows 11 実測済みへ
+#     更新した後も、`promo-kit/data/<slug>.json` の
+#     `shotlist[].overrides.infoRows[].text` **1 か所だけ**が「動作確認は macOS（他の OS での
+#     実測はしていません）」のまま取り残され、そこから生成した BOOTH のギャラリー画像と
+#     出品用画像が嘘をつき続けていた。**実態より狭く名乗る向き**の事故で、店頭の面だけが古い形。
+#
+# 【promo-kit は「元テキスト」しか見ない】(5) はテキストだが、**購入検討者が実際に見るのは
+# そこから生成された画像**である。この検査が確かめられるのは元データの文字列までで、
+# **画像を作り直して配ったかは見ていない**（OCR が無いので画像の中の文字は読めない）。
+# 指摘文にもこの但し書き（`PROMO_KIT_CAVEAT`）を必ず添える。省くと「検査 24 が通ったから
+# 画像も正しい」と誤読され、事故の本体（古い画像が店頭に出たまま）を見逃す。
+# 配った画像そのものが古いかどうかは、検査 23 がコミット時刻という代理指標で別に見る。
+#
+# 【基準は同梱 `README.md`】同梱物が実物に一番近い（`.tgz` に入って購入者の手元へ届く）ため、
+# ほかの 3 面は README を基準に突き合わせる。スイートでは全パッケージの README の**和集合**を
+# 商品の基準にする（従属パッケージが記載を持たない構成があるため。TAE curve が実際にそう）。
+#
+# 【片側にしか無いときの扱いは向きで変える】ここは対称ではない。理由が違うためである。
+#   - **基準（README）にだけあり、紹介文・店頭に無い → 無言**。`description` や商品ページに
+#     動作確認環境を書くかどうかは**製品の裁量**であり、**書いていないものは陳腐化しようがない**。
+#     実際 EPE / UEL / TAE / UMPD の `description` には無く、それは正しい状態である。
+#   - **紹介文・店頭にだけあり、同梱 README に無い → warn**。こちらは**裏付けの無い主張**が
+#     売り場に出ている状態で、購入者が手元の同梱物で確かめようとしても確かめられない。
+#     誤りとは限らない（README に書き忘れただけかもしれない）ので error にはしない。
+#   - **両方にあって食い違う → error**。どちらかが必ず嘘であり、判断の余地が無い。
+#
+# 【比較は語の集合】バイト一致ではなく、その文に現れる「OS 名と Unity バージョン」の集合で比べる。
+# 英語と日本語では文の作りが違う（"Verified on Unity 2022.3.22f1 / macOS / Windows 11." と
+# 「動作確認は Unity 2022.3.22f1 / macOS / Windows 11 で行っています。」）ので、文全体を比べると
+# 正しい記述まで落ちる。集合が違うことだけが「名乗っている環境が違う」を意味する。
+#
+# 【`description` は英日を別々に拾う】英日 2 文が改行で並ぶ形式なので、片方の言語だけ直して
+# 他方を忘れる失敗がまさに起こりうる（UEWCE の事故でも英文・和文の両方が `macOS` 単独のまま
+# 残っていた）。言語をまたいだ突き合わせは許す（UEWCE の README は和文 1 行だけだが
+# `description` は英日 2 文を持つ。語の集合で比べる以上、言語で分ける理由が無い）。
+#
+# 【但し書きの括弧は落とす】実データの過半が「動作確認: … / Windows 11（**Linux での実測は
+# していません**）」の形で、**否定の但し書きを同じ文の括弧内に置く**。素朴に拾うと `Linux` が
+# 「確認済み」の側に混ざる。そこで**否定語を含む括弧だけ**を除いてから語を拾う
+# （括弧を無条件に落とさないのは、`動作確認: Unity 2022.3.22f1（macOS / Windows 11）` のような
+# 正当な書き方まで壊すため）。文が `。` や `.` で切れた後ろの但し書きは、文の切り出しで既に落ちる。
+#
+# 割り切った点（判定できないものは判定しないと決めた範囲）:
+#   - **記述の範囲は「1 行の中の 1 文」まで**（`。` または `.` ＋空白/行末で切る）。行をまたいで
+#     続く書き方は後半を読まない。実データ 5 商品 9 パッケージ・4 面はすべて 1 行に収まっている。
+#   - **語を 1 つも拾えない文は記述とみなさない**（例「動作確認の手順は Documentation~ を参照」）。
+#     空集合同士が一致してしまい、何も確かめていないのに緑を出すため。
+#   - 英語の目印は**大文字始まりの `Verified on` / `Tested on` に限る**。小文字まで拾うと地の文
+#     （"we verified on ..."）を巻き込む。2 つ要るのは実データがそう割れているため
+#     （同梱 README は `Verified on`、サイトの `descriptions/en.md` は `Tested on:`）。
+#   - 翻訳版 README（`README.<locale>.md`）は見ない。`description` は 1 つしか無く、
+#     どの翻訳と突き合わせるべきかが決まらない（正本は日英が並ぶ `README.md`）。
+#   - サイトを解決できない環境では店頭の面を**黙って飛ばさず warn で言い残す**（検査 22 と同じ。
+#     「突き合わせた結果の緑」と「突き合わせていない緑」が区別できなくなるため）。
+#
+# waiver の target には `Packages/<name>/package.json` / `Packages/<name>/README.md` /
+# `products/<slug>/publish.json` / `products/<slug>/descriptions/<file>.md` /
+# `promo-kit/data/<file>.json` を書く（`products/<slug>` は店頭側をまとめて外す）。
+# ---------------------------------------------------------------------------
+
+# 「動作確認済み環境」を名乗る記述の目印。実データは同梱 README が `Verified on`、
+# サイトの `descriptions/en.md` が `Tested on:` に割れているので英語は 2 つ持つ
+VERIFIED_ENV_MARKERS = (("和文", "動作確認"), ("英文", "Verified on"), ("英文", "Tested on"))
+
+# 突き合わせる語。`Windows` だけは後続の数字まで含める（`Windows 11` と `Windows` は別の主張）
+VERIFIED_ENV_OS_RE = re.compile(r"(?:macOS|Windows(?:\s+\d+(?:\.\d+)?)?|Linux)", re.IGNORECASE)
+VERIFIED_ENV_UNITY_RE = re.compile(r"\d+\.\d+\.\d+[abfp]\d+")
+# 英文の文末（`.` の直後が空白か行末のときだけ。`2022.3.22f1` の途中で切らないため）
+VERIFIED_ENV_SENTENCE_END_RE = re.compile(r"\.(?:\s|$)")
+# 同じ文の中に置かれた但し書きの括弧（入れ子は想定しない。実データに無い）
+VERIFIED_ENV_PARENTHETICAL_RE = re.compile(r"（[^（）]*）|\([^()]*\)")
+# 「確認していない」側を表す語。これを含む括弧の中身は「確認済み」の集合に入れない
+VERIFIED_ENV_NEGATION_RE = re.compile(
+    r"していません|しておりません|していない|未実測|未検証|未確認|非対応|対象外"
+    r"|\b(?:not|never|unverified|untested|unsupported)\b",
+    re.IGNORECASE,
+)
+
+# サイト側で同じ主張が載る面（表示名は指摘文でそのまま使う）
+SITE_ENV_DESCRIPTIONS_DIR = "descriptions"
+
+# promo-kit だけに要る但し書き。**元データと、そこから作って配った画像は別物**なので、
+# ここを省くと「検査 24 が通ったから画像も正しい」と誤読される
+PROMO_KIT_CAVEAT = (
+    "。なお**この検査が見たのは生成元データの文字列だけ**です。"
+    "そこから作った画像を撮り直して配ったかは見ていません"
+    "（画像の中の文字は読めません。OCR を持たないため）。"
+    "データを直したら promo-kit で画像を再生成し、商品ページ（assets/）と"
+    "出品用（publish-assets/）へ配り直したかを必ず自分で確かめてください"
+    "（その 2 面が古いままかどうかは検査 23 がコミット時刻で別に見ます）"
+)
+
+
+def _normalize_os_token(raw: str) -> str:
+    """OS 名の表記ゆれを正規化する（`MACOS` / `macos` → `macOS`、空白の詰め方も揃える）。"""
+    collapsed = re.sub(r"\s+", " ", raw).strip()
+    lowered = collapsed.lower()
+    if lowered.startswith("macos"):
+        return "macOS"
+    if lowered.startswith("linux"):
+        return "Linux"
+    return "Windows" + collapsed[len("Windows") :]  # 後続の版番号はそのまま残す
+
+
+def _drop_negated_parentheticals(sentence: str) -> str:
+    """否定の但し書きを置いた括弧を落とす（`… / Windows 11（Linux での実測はしていません）`）。
+
+    括弧を無条件に落とすと `動作確認: Unity 2022.3.22f1（macOS / Windows 11）` のような
+    正当な書き方まで壊れるので、**否定語を含む括弧だけ**を対象にする。
+    """
+    return VERIFIED_ENV_PARENTHETICAL_RE.sub(
+        lambda match: "" if VERIFIED_ENV_NEGATION_RE.search(match.group(0)) else match.group(0),
+        sentence,
+    )
+
+
+def _verified_env_tokens(sentence: str) -> frozenset[str]:
+    """その文が名乗っている環境の集合（OS 名と Unity バージョン）。"""
+    body = _drop_negated_parentheticals(sentence)
+    tokens = {_normalize_os_token(match.group(0)) for match in VERIFIED_ENV_OS_RE.finditer(body)}
+    tokens.update(VERIFIED_ENV_UNITY_RE.findall(body))
+    return frozenset(tokens)
+
+
+def _format_env_tokens(tokens: frozenset[str]) -> str:
+    """指摘文へ埋める表示（Unity バージョンを先に、OS 名を後に。並びは決定的にする）。"""
+    versions = sorted(token for token in tokens if VERIFIED_ENV_UNITY_RE.fullmatch(token))
+    systems = sorted((token for token in tokens if token not in set(versions)), key=str.lower)
+    return " / ".join(versions + systems) or "（記載なし）"
+
+
+def _union_env_tokens(records: list[tuple[str, frozenset[str]]]) -> frozenset[str]:
+    """複数の記述が名乗る環境の和集合（記述が 1 つも無ければ空集合）。"""
+    return frozenset().union(*(tokens for _, tokens in records)) if records else frozenset()
+
+
+def _env_token_diff(claimed: frozenset[str], baseline: frozenset[str], claim_label: str) -> str:
+    """食い違いの中身を「どちら側にだけあるか」で述べる（検査 22 の `_declaration_diff` と同じ流儀）。"""
+    parts = []
+    only_claim = sorted(claimed - baseline, key=str.lower)
+    only_baseline = sorted(baseline - claimed, key=str.lower)
+    if only_claim:
+        parts.append(f"{claim_label}にだけある: {', '.join(only_claim)}")
+    if only_baseline:
+        parts.append(f"同梱 README にだけある: {', '.join(only_baseline)}")
+    return "・".join(parts)
+
+
+def _verified_env_records(text: str) -> list[tuple[str, frozenset[str]]]:
+    """本文から「動作確認済み環境」を名乗る記述を `(言語ラベル, 語の集合)` で拾う。
+
+    行単位で目印を探し、そこから 1 文だけを切り出す。語を 1 つも拾えない文は
+    「環境を名乗っていない」とみなして落とす（空集合同士の一致で緑を出さないため）。
+    """
+    records: list[tuple[str, frozenset[str]]] = []
+    for line in text.splitlines():
+        for label, marker in VERIFIED_ENV_MARKERS:
+            start = 0
+            while True:
+                index = line.find(marker, start)
+                if index < 0:
+                    break
+                start = index + len(marker)
+                fragment = line[index:]
+                if marker == "動作確認":
+                    end = fragment.find("。")
+                    sentence = fragment[:end] if end >= 0 else fragment
+                else:
+                    match = VERIFIED_ENV_SENTENCE_END_RE.search(fragment)
+                    sentence = fragment[: match.start()] if match else fragment
+                tokens = _verified_env_tokens(sentence)
+                if tokens:
+                    records.append((label, tokens))
+    return records
+
+
+def _read_text_or_none(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def check_24_verified_environment(ctx: RepoContext) -> None:
+    """検査 24「動作確認済み環境の面間整合」。同梱 README を基準に紹介文と店頭の面を突き合わせる。"""
+    if not ctx.packages:
+        return
+
+    # --- 基準を作る: 全パッケージの同梱 README が名乗る環境の和集合 ---------------
+    baseline_records: list[tuple[str, frozenset[str]]] = []
+    package_readmes: dict[str, frozenset[str]] = {}
+    for name, package_dir, _ in ctx.packages:
+        text = _read_text_or_none(package_dir / "README.md")
+        if text is None:
+            continue  # 不在は check_extra が warn で言う（比較の相手が無いだけで不整合ではない）
+        records = _verified_env_records(text)
+        baseline_records += records
+        package_readmes[name] = _union_env_tokens(records)
+    baseline = _union_env_tokens(baseline_records)
+
+    # --- 24-a / 24-b: `package.json` の description（同梱物の中の面） --------------
+    for name, package_dir, meta in ctx.packages:
+        package_rel = package_dir.relative_to(ctx.root).as_posix()
+        config_rel = f"{package_rel}/package.json"
+        if name not in package_readmes:
+            continue  # README が無ければ基準が無い
+        if ctx.is_waived("24", config_rel) or ctx.is_waived("24", f"{package_rel}/README.md"):
+            continue
+
+        description_records = _verified_env_records(str(meta.get("description") or ""))
+        if not description_records:
+            # README にだけあるのは**指摘しない**。description に動作確認環境を書くかどうかは
+            # 製品の裁量であり、書いていないものは陳腐化しようがない（EPE / UEL / TAE / UMPD が
+            # 実際にこの形で、それが正しい状態）
+            continue
+
+        readme_tokens = package_readmes[name]
+        if not readme_tokens:
+            # 24-a: 紹介文だけが裏付けの無い主張をしている（誤りとは限らないので warn）
+            ctx.add(
+                "24",
+                WARN,
+                f"{name}: package.json の description は動作確認済み環境"
+                f"（{_format_env_tokens(_union_env_tokens(description_records))}）を名乗っていますが、"
+                f"同梱 README.md に対応する記述がありません。**説明欄でだけ環境を約束し、"
+                f"同じ `.tgz` に入る文書がそれを裏付けない**状態なので、購入者は手元で確かめられません"
+                f"（逆向き——README にあって description に無い——は指摘しません。"
+                f"description に書くかどうかは製品の裁量で、書いていないものは陳腐化しようがないため）。"
+                f"README にも同じ環境を書くか、description 側の記載を実測できた範囲へ揃えてください"
+                f"（GOLD_STANDARD §2.5・§2.10 検査 24）",
+                config_rel,
+            )
+            continue
+
+        # 24-b: 両方にあって食い違う（error）。英日を別々に見るのは、片方の言語だけ直す失敗のため
+        for label, tokens in description_records:
+            if tokens == readme_tokens:
+                continue
+            ctx.add(
+                "24",
+                ERROR,
+                f"{name}: package.json の description（{label}）が名乗る動作確認済み環境が、"
+                f"同梱 README.md の記述と食い違っています"
+                f"（{_env_token_diff(tokens, readme_tokens, 'description 側')}。"
+                f"description: {_format_env_tokens(tokens)} / "
+                f"README: {_format_env_tokens(readme_tokens)}）。"
+                f"description は Package Manager の説明欄にそのまま出る面なので、"
+                f"**同じ `.tgz` の中で README と違うことを言っている**状態になり、"
+                f"購入者はどちらが本当かを確かめられません。"
+                f"実際に UEWCE 1.2.0 で、Windows 11 の実測を済ませて README と商品ページを"
+                f"「Unity 2022.3.22f1 / macOS / Windows 11」へ直したのに、"
+                f"**description だけが macOS 単独のまま出荷されました**"
+                f"（2026-08-15 検出。文字列なので grep できる面なのに、"
+                f"どの検査も見ていませんでした）。対応環境は EULA 第 10 条で保証範囲に紐づいた"
+                f"契約の内容（検査 17）でもあります。description は英日 2 文が並ぶので、"
+                f"**英文と和文の両方**を直してください（GOLD_STANDARD §2.5・§2.10 検査 24）",
+                config_rel,
+            )
+
+    # --- 24-c: サイト側（商品ページ・出品用の本文） -------------------------------
+    _check_verified_environment_on_site(ctx, baseline)
+
+
+@dataclass(frozen=True)
+class SiteEnvSurface:
+    """サイト側で同じ主張が載る 1 つの面。
+
+    `caveat` は「この面について、この検査が確かめていないこと」。指摘文の末尾へそのまま添える。
+    promo-kit のように**元データと配った成果物が別物**の面では、これを省くと
+    「検査が通ったから画像も正しい」と誤読される。
+    """
+
+    target: str  # waiver と報告に使うパス
+    label: str  # 指摘文に出す表示名
+    text: str  # 走査する本文
+    caveat: str = ""
+
+
+def _promo_kit_data_path(site_root: Path, slug: str) -> Path:
+    """promo-kit の生成元データの置き場所。
+
+    ファイル名は**商品 slug からハイフンを除いた形**（`export-package-extension` →
+    `exportpackageextension.json`）。実データ 5 商品すべてがこの命名で、JSON 内の `slug` の値も
+    同じ de-hyphenate 済みの文字列になっている（2026-08-15 実測）。
+    """
+    return site_root / "promo-kit" / "data" / f"{slug.replace('-', '')}.json"
+
+
+def _json_strings(node: object) -> list[str]:
+    """JSON の値を再帰的にたどって文字列だけを集める（キーは対象にしない）。
+
+    promo-kit のデータは `shotlist[].overrides.infoRows[].text` のように**深い位置**へ
+    表示文言を持ち、しかも構成はテンプレートごとに違う。特定のパスを決め打ちすると
+    レイアウトを 1 つ足しただけで検査が黙るので、構造に依存せず全文字列を見る。
+    """
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [text for value in node.values() for text in _json_strings(value)]
+    if isinstance(node, list):
+        return [text for value in node for text in _json_strings(value)]
+    return []
+
+
+def _site_env_surfaces(ctx: RepoContext, site_root: Path, slug: str) -> list[SiteEnvSurface]:
+    """サイト側で同じ主張が載る面をすべて返す。"""
+    surfaces: list[SiteEnvSurface] = []
+
+    product_dir = _site_product_dir(ctx)
+    if product_dir is not None:
+        publish = load_json(product_dir / "publish.json") or {}
+        description_input = publish.get("descriptionInput")
+        if isinstance(description_input, dict):
+            requirements = str(description_input.get("requirements") or "")
+            if requirements:
+                surfaces.append(
+                    SiteEnvSurface(
+                        f"products/{slug}/publish.json",
+                        "publish.json の descriptionInput.requirements",
+                        requirements,
+                    )
+                )
+
+        for path in sorted((product_dir / SITE_ENV_DESCRIPTIONS_DIR).glob("*.md")):
+            text = _read_text_or_none(path)
+            if text is not None:
+                surfaces.append(
+                    SiteEnvSurface(
+                        f"products/{slug}/{SITE_ENV_DESCRIPTIONS_DIR}/{path.name}",
+                        f"商品説明文 {path.name}",
+                        text,
+                    )
+                )
+
+    # --- 24-d: promo-kit の生成元データ -----------------------------------------
+    promo = _promo_kit_data_path(site_root, slug)
+    data = load_json(promo)
+    if data is not None:
+        # 1 文字列＝1 行として渡す。行単位の切り出しがそのまま「値ごとに独立して読む」になり、
+        # 無関係な値どうしが 1 文につながるのを防げる
+        surfaces.append(
+            SiteEnvSurface(
+                f"promo-kit/data/{promo.name}",
+                f"promo-kit の生成元データ {promo.name}",
+                "\n".join(_json_strings(data)),
+                PROMO_KIT_CAVEAT,
+            )
+        )
+    return surfaces
+
+
+def _check_verified_environment_on_site(ctx: RepoContext, baseline: frozenset[str]) -> None:
+    """店頭の面（サイト側）が同梱 README と同じ環境を名乗っているか。
+
+    サイトを解決できない環境では**黙って飛ばさず warn で言い残す**（検査 22 と同じ流儀。
+    「突き合わせた結果の緑」と「突き合わせていない緑」が区別できなくなるため）。
+    """
+    slug = str(ctx.config.get("productSlug") or "").strip()
+    if not slug:
+        return  # 突き合わせる鍵が無い（検査 0 が error で言う）
+
+    # 「サイトリポジトリが見つからない」と「サイトにこの商品がまだ無い」を混ぜない。
+    # 前者は**見ていないだけ**なので言い残す必要があり、後者は**店頭の面が存在しない**ので
+    # 食い違いようがない（書いていないものは陳腐化しようがない、と同じ）。
+    site_root = resolve_site_repo(ctx)
+    if site_root is None:
+        if baseline and not ctx.is_waived("24", f"products/{slug}"):
+            ctx.add(
+                "24",
+                WARN,
+                f"サイト側（商品ページ・出品用の本文・promo-kit の生成元データ）の動作確認済み環境を"
+                f"突き合わせていません（**未確認**であって一致の確認ではありません）。同梱 README は"
+                f"「{_format_env_tokens(baseline)}」を名乗っていますが、MySite のチェックアウトを"
+                f"解決できないため products/{slug}/ の publish.json・descriptions/ と "
+                f"promo-kit/data/ を見ていません。"
+                f"手元で確かめるには PIPELINE_SITE_REPO に MySite のチェックアウトを指すか、"
+                f"~/.kajitaharuka-pipeline.json の overrides.mysite を設定してください"
+                f"（GOLD_STANDARD §2.10 検査 24）",
+            )
+        return
+
+    claiming = [
+        (surface, records)
+        for surface in _site_env_surfaces(ctx, site_root, slug)
+        if not ctx.is_waived("24", surface.target)
+        # 店頭に書かないのは製品の裁量（書いていないものは陳腐化しようがない）
+        for records in [_verified_env_records(surface.text)]
+        if records
+    ]
+
+    if not baseline:
+        # 基準が無いので食い違いは判定できない。**面ごとに 1 件ずつ出すと同じ 1 つの直し方
+        # （同梱 README に 1 行足す）へ複数件鳴ることになる**ので、商品につき 1 件へまとめる
+        if claiming and not ctx.is_waived("24", f"products/{slug}"):
+            labels = "・".join(surface.label for surface, _ in claiming)
+            tokens = _union_env_tokens([record for _, records in claiming for record in records])
+            caveats = "".join(sorted({surface.caveat for surface, _ in claiming if surface.caveat}))
+            ctx.add(
+                "24",
+                WARN,
+                f"店頭の面（{labels}）は動作確認済み環境（{_format_env_tokens(tokens)}）を"
+                f"名乗っていますが、同梱 README.md に対応する記述がありません。"
+                f"**これらの本文は販売プラットフォームへそのまま投入される**のに、"
+                f"購入者が手元の同梱物で裏付けを取れない状態です"
+                f"（逆向き——同梱 README にあって店頭に無い——は指摘しません。"
+                f"店頭に書くかどうかは製品の裁量で、書いていないものは陳腐化しようがないため）。"
+                f"同梱 README にも同じ環境を書いてください（GOLD_STANDARD §2.5・§2.10 検査 24）"
+                f"{caveats}",
+                f"products/{slug}",
+            )
+        return
+
+    for surface, records in claiming:
+        for record_label, tokens in records:
+            if tokens == baseline:
+                continue
+            ctx.add(
+                "24",
+                ERROR,
+                f"「{surface.label}」（{record_label}）が名乗る動作確認済み環境が、"
+                f"同梱 README.md の記述と食い違っています"
+                f"（{_env_token_diff(tokens, baseline, '店頭')}。"
+                f"店頭: {_format_env_tokens(tokens)} / 同梱 README: {_format_env_tokens(baseline)}）。"
+                f"**この本文は販売プラットフォームへそのまま投入され**、購入者は購入前にこれだけを見ます。"
+                f"対応環境は EULA 第 10 条で保証範囲に紐づいた契約の内容（検査 17）なので、"
+                f"食い違いはそのまま契約不適合になります。"
+                f"実際に EPE / UEL / UEWCE で、商品ページの本文と publish.json を Windows 11 実測済みへ"
+                f"更新した後も promo-kit の生成元データ 1 ファイルだけが取り残され、そこから作った"
+                f"BOOTH のギャラリー画像と出品用画像が「動作確認は macOS（他の OS での実測は"
+                f"していません）」と言い続けていました（2026-08-15 検出。**実態より狭く名乗る向き**の"
+                f"事故で、店頭の面だけが古い形です）。基準は**同梱 README**（`.tgz` に入って"
+                f"購入者の手元へ届く実物に一番近い面）なので、どちらが実測かを確かめてから"
+                f"両方を揃えてください（GOLD_STANDARD §2.5・§2.10 検査 24）"
+                f"{surface.caveat}",
+                surface.target,
+            )
+
+
 def check_extra(ctx: RepoContext) -> None:
     for name, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()
@@ -3924,6 +4380,7 @@ CHECKS = (
     check_21_l10n_key_coverage,
     check_22_registry_sale_unit,
     check_23_stale_product_page_images,
+    check_24_verified_environment,
     check_extra,
 )
 

@@ -2,8 +2,8 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/templates/githooks-pre-commit
-# source-sha256: 1c227a854ba1980ef6f5e597673ae1693fea7fa7f32592d61a0dc9c17385c9f5
-# スキルのミラーが正本とずれたまま commit されるのを止める。
+# source-sha256: 0943a6b51bb5b877239b713d65e3587a963d4fffc6974adb9fe396082938fbb4
+# テンプレート GUID の流用と、スキルミラーの drift を commit 前に止める。
 #
 # **同期はしない（index も working tree も変更しない）。** 検査だけを行い、ずれていれば
 # commit を止めて修復コマンドを案内する。commit の途中で index を書き換えると
@@ -24,10 +24,25 @@ set -e
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
-# skillSync 宣言を持たないリポジトリでは何もしない（スキルのミラーを持たないリポジトリ）。
 if [ ! -f pipeline/repo.json ]; then
   exit 0
 fi
+
+# テンプレート正本だけは .meta を 1 件も持たない。派生先の初回 import で固有 GUID を生成する。
+# find の対象を Unity のソース領域へ限定し、Library/PackageCache 等の生成物を巻き込まない。
+if grep -Eq '"role"[[:space:]]*:[[:space:]]*"standard"' pipeline/repo.json 2>/dev/null; then
+  template_meta=$(find Assets Packages -type f -name '*.meta' -print 2>/dev/null || true)
+  if [ -n "$template_meta" ]; then
+    echo "" >&2
+    echo "commit を中止しました: テンプレート正本へ .meta はコミットできません。" >&2
+    printf '%s\n' "$template_meta" >&2
+    echo "派生先の初回 Unity import に固有 GUID を生成させてください。" >&2
+    echo "" >&2
+    exit 1
+  fi
+fi
+
+# skillSync 宣言を持たないリポジトリでは、以降のミラー検査は行わない。
 if ! grep -q '"skillSync"' pipeline/repo.json 2>/dev/null; then
   exit 0
 fi

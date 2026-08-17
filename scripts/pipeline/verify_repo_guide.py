@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 1bec7ebeb6498127f57bc1552c12cc622901ca2e130b8f21126f9e7a1342946d
+# source-sha256: 329dd6b6e10cab53c7c15e5953c26c63efd3007a6721c9b363e45f9c487f61fb
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -770,6 +770,35 @@ def check_06_meta_completeness(ctx: RepoContext) -> None:
     「追跡済みのアセットなのに `.meta` が欠けている／追跡されていない」は印を付けない。
     後者は自分がコミットした内容そのものの不備であり、他人の作業では説明できないため。
     """
+    if ctx.role == "standard":
+        # テンプレートの GUID を派生先へ複製しないため、正本だけは通常の完全性規則を反転する。
+        # 派生先の初回 Unity import が固有 GUID を生成し、一時 bootstrap が旧参照を再配線する。
+        bootstrap_paths = (
+            "Assets/TemplateGuidBootstrap/TemplateGuidBootstrapMap.json",
+            "Assets/TemplateGuidBootstrap/Editor/TemplateGuidBootstrap.cs",
+        )
+        for rel in bootstrap_paths:
+            if not (ctx.root / rel).is_file():
+                ctx.add("6", ERROR, "テンプレート GUID bootstrap がありません", rel)
+
+        source_roots = [ctx.root / "Assets"] + [package_dir for _, package_dir, _ in ctx.packages]
+        meta_paths: set[str] = set()
+        for source_root in source_roots:
+            if not source_root.is_dir():
+                continue
+            for path in source_root.rglob("*.meta"):
+                if path.is_file():
+                    meta_paths.add(path.relative_to(ctx.root).as_posix())
+
+        for rel in sorted(meta_paths):
+            ctx.add(
+                "6",
+                ERROR,
+                "テンプレート正本に .meta があります（GUID が派生先へ複製されるため禁止）",
+                rel,
+            )
+        return
+
     for _, package_dir, _ in ctx.packages:
         root_meta = package_dir.parent / f"{package_dir.name}.meta"
         if root_meta.exists():

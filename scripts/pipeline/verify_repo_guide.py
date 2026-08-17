@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: c281cbf75780418a768f0b77c7bf6d358a1fe7f84c08a71129e172f8e1aeef43
+# source-sha256: 1bec7ebeb6498127f57bc1552c12cc622901ca2e130b8f21126f9e7a1342946d
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -143,7 +143,7 @@ VALID_CHECK_IDS = {
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
     "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "+",
 }
-VALID_ROLES = {"standard", "product", "site", "content", "infra", "sandbox"}
+VALID_ROLES = {"standard", "product", "internal", "site", "content", "infra", "sandbox"}
 ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
 
 
@@ -840,6 +840,9 @@ SITE_BASE = "https://kajitaharuka.com/products/"
 
 
 def check_08_package_urls(ctx: RepoContext) -> None:
+    if ctx.role == "internal":
+        return
+
     declared_slug = ctx.config.get("productSlug")
     for _, package_dir, meta in ctx.packages:
         rel = (package_dir / "package.json").relative_to(ctx.root).as_posix()

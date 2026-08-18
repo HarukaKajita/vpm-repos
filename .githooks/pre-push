@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/templates/githooks-pre-push
-# source-sha256: 278140f6eb1d6ce52e67be7c27574689a2be57bc8d1cbf720eac8c02b902d4b2
+# source-sha256: fa76928a7a7f262d5d335283ba5a1ded5c28d20c52ea76ee4d65d42fd60b36aa
 # push する前に、そのリポジトリで走らせられる検査をまとめて走らせる。
 #
 # pre-commit との役割分担: pre-commit は commit のたびに走るため検査 12（スキルミラーの
@@ -74,6 +74,26 @@ note_skip() {
   skips="${skips}  - $1
 "
 }
+
+# ---------------------------------------------------------------------------
+# 実行可能な Python 3 を選ぶ（Windows の Microsoft Store スタブ対策）
+# ---------------------------------------------------------------------------
+# Windows では `command -v python3` が Microsoft Store の実行エイリアスを返しても、実行時に
+# Permission denied になることがある。存在確認だけでは使える Python か判定できないため、実際に
+# 1 行実行して Python 3 であることまで確かめる。macOS / Linux では通常どおり python3 を優先し、
+# それが使えない場合だけ python へフォールバックする。
+resolve_python3_command() {
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+      "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+python_command=$(resolve_python3_command || true)
 
 # ---------------------------------------------------------------------------
 # node を PATH へ載せる（GUI の git クライアント対策）
@@ -154,22 +174,22 @@ fi
 # ---------------------------------------------------------------------------
 # 標準準拠検査（verify_repo_guide.py の error 全件）
 # ---------------------------------------------------------------------------
-# **fail-closed**: python3 が無ければ検査自体を飛ばすが（下の分岐）、検査が走って error を
+# **fail-closed**: 実行可能な Python 3 が無ければ検査自体を飛ばすが（下の分岐）、検査が走って error を
 # 出したときは必ず push を止める。error は「宣言と実装がずれている」という、そのリポジトリ内で
 # 完結して判定できる客観的な不整合であり、握りつぶす理由が無い。
 # warn は止めない（実態と合っているか人が判断する種類の指摘のため）。出力はそのまま見せる。
 #
 # 終了コードの契約: 0=error なし / 1=error あり / 2=起動失敗。1 と 2 のどちらも押し止める。
 if [ -f scripts/pipeline/verify_repo_guide.py ]; then
-  if command -v python3 >/dev/null 2>&1; then
-    verify_output=$(python3 scripts/pipeline/verify_repo_guide.py 2>&1)
+  if [ -n "$python_command" ]; then
+    verify_output=$("$python_command" scripts/pipeline/verify_repo_guide.py 2>&1)
     verify_status=$?
     printf '%s\n' "$verify_output"
     if [ "$verify_status" -ne 0 ]; then
       note_failure "標準準拠検査 (scripts/pipeline/verify_repo_guide.py)"
     fi
   else
-    echo "pre-push: python3 が無いため標準準拠検査をスキップします" >&2
+    echo "pre-push: 実行可能な Python 3（python3 / python）が無いため標準準拠検査をスキップします" >&2
   fi
 fi
 
@@ -192,13 +212,13 @@ fi
 # `requires` の型を厳しく見るのも同じ理由で、文字列でない値は存在しないパスとして扱われ、
 # 「skip」と表示されたまま一度も走らない状態が固定化するため。
 #
-# **fail-open**: python3 が無い環境では prePush を無視して警告だけ出して通す。
-# JSON を読むためだけに python3 の有無で push できなくなるのは代償が大きすぎるため
+# **fail-open**: 実行可能な Python 3 が無い環境では prePush を無視して警告だけ出して通す。
+# JSON を読むためだけに Python 3 の有無で push できなくなるのは代償が大きすぎるため
 # （この hook は「早期検出」であって最終保証ではない。最終的な保証は Cloudflare Pages の
 # ビルドとリリースゲートが持つ）。上の標準準拠検査を fail-closed にしているのとは、
 # 「検査が走って落ちた」のか「検査を走らせる手段が無い」のかという違いで区別している。
 if [ -f pipeline/repo.json ]; then
-  if command -v python3 >/dev/null 2>&1; then
+  if [ -n "$python_command" ]; then
     plan_file=$(mktemp)
     trap 'rm -f "$plan_file"' EXIT
 
@@ -210,7 +230,7 @@ if [ -f pipeline/repo.json ]; then
     # どのキーをどう直せばよいのかが宣言者に伝わらないため。詳細は python 側が
     # 標準エラーへ 1 行で出し、shell 側は終了コードから同じ原因を言い直す
     # （python の出力が失われても原因が分かるようにするための二重化）。
-    python3 - "$plan_file" <<'PYTHON'
+    "$python_command" - "$plan_file" <<'PYTHON'
 import json
 import pathlib
 import sys
@@ -423,7 +443,7 @@ PYTHON
       done <"$plan_file"
     fi
   else
-    echo "pre-push: python3 が無いため pipeline/repo.json の prePush 宣言をスキップします" >&2
+    echo "pre-push: 実行可能な Python 3（python3 / python）が無いため pipeline/repo.json の prePush 宣言をスキップします" >&2
   fi
 fi
 

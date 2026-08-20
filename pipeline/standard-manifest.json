@@ -2,7 +2,7 @@
   "$schemaVersion": 1,
   "source": {
     "repository": "UnityTemplate_2022_3_22f1",
-    "commit": "08105c703c280b5bcf1f82dc37894090cfee145f",
+    "commit": "e92c633a8ee1cb8ece8c0dd3575ceb11b867e241",
     "dirty": false,
     "profile": "guide"
   },

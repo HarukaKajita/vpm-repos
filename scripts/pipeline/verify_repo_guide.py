@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 329dd6b6e10cab53c7c15e5953c26c63efd3007a6721c9b363e45f9c487f61fb
+# source-sha256: dc8304d47b3f9a276aac13b6db37856eaa43ceba4feee8608ecd0a12f32dccdf
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -40,6 +40,21 @@
   intent-to-add してから走らせる**のが正しい手順で、これは検査 6 に限らず新規ファイルを置く作業全般の
   前提になる（GOLD_STANDARD §2.10 の検査 6 の項）。
 - 既定（フラグ無し）の挙動は一切変えない。pre-push hook はフラグ無しで呼ぶため、関門は緩まない。
+
+検査対象の package を決める規則（2026-08-22 追加）:
+- `Packages/` には、このリポジトリが所有する embedded package と、**UPM / VPM がローカルへ
+  展開しただけの第三者パッケージ**が混在する。後者まで検査すると、VRChat 系リポジトリでは
+  `com.vrchat.*` / `nadena.*` に購入者向け文書や Third Party Notices を要求して
+  **error が数千件になり、検査そのものが機能しなくなる**（実測 2026-08-22: Sparkler で error 2989 件）。
+- そこで検査対象から外すのは、**機械的な事実 2 つで「所有物ではない」と説明できるもの**だけに限る。
+    (a) `git ls-files Packages/<name>/` が 1 件も無い ＝ そもそもこのリポジトリの中身ではない
+    (b) `Packages/vpm-manifest.json` の `dependencies` / `locked` に名前がある ＝ 第三者を vendoring
+        しただけだと宣言済み（VPM resolver のように意図的にコミットするものがここに該当する）
+- **`--paths <glob>` 方式を採らないのと同じ理由**で、パターンによる絞り込みは入れない。上の 2 つは
+  「見なかったことにする」ではなく「所有していない」の判定であり、しかも**外したものは必ず
+  INFO 行で全件表示する**（消さない・隠さない）。
+- この規則の穴は「自分のパッケージを新規に置いたが、まだ 1 ファイルも git add していない」場合に
+  静かに対象外になること。`git add -N`（intent-to-add）してから検査するという既存の前提で塞ぐ。
 
 正本: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
 各開発リポジトリへは scripts/distribute_standard.py が配布する（配布物は編集しない）。
@@ -220,6 +235,8 @@ class RepoContext:
     tracked: set[str]
     tracked_dirs: set[str] = field(default_factory=set)
     packages: list[tuple[str, Path, dict]] = field(default_factory=list)
+    # 検査対象から外した Packages/<name>（name, 相対パス, 外した理由）。必ず出力に出す。
+    foreign_packages: list[tuple[str, str, str]] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
 
     def add(
@@ -4376,14 +4393,27 @@ def build_context(root: Path) -> RepoContext:
             tracked_dirs.add("/".join(parts[:index]))
     ctx = RepoContext(root=root, config=config, tracked=tracked, tracked_dirs=tracked_dirs)
 
+    # VPM が解決した第三者パッケージの宣言。dependencies と locked の両方を見る。
+    vpm = load_json(root / "Packages" / "vpm-manifest.json") or {}
+    vpm_declared = set(vpm.get("locked") or {}) | set(vpm.get("dependencies") or {})
+
     packages_dir = root / "Packages"
     if packages_dir.is_dir():
         for entry in sorted(packages_dir.iterdir()):
             if not entry.is_dir():
                 continue
             meta = load_json(entry / "package.json")
-            if meta and meta.get("name"):
-                ctx.packages.append((meta["name"], entry, meta))
+            if not (meta and meta.get("name")):
+                continue
+            rel = entry.relative_to(root).as_posix()
+            # 外してよいのは「所有していない」と機械的に言えるものだけ（docstring の規則）。
+            if rel not in tracked_dirs:
+                ctx.foreign_packages.append((meta["name"], rel, "git 未追跡"))
+                continue
+            if meta["name"] in vpm_declared:
+                ctx.foreign_packages.append((meta["name"], rel, "vpm-manifest.json 由来"))
+                continue
+            ctx.packages.append((meta["name"], entry, meta))
     return ctx
 
 
@@ -4456,6 +4486,10 @@ def main(argv: list[str]) -> int:
             "root": str(root),
             "role": ctx.role,
             "packages": [name for name, _, _ in ctx.packages],
+            "foreignPackages": [
+                {"name": name, "path": rel, "reason": why}
+                for name, rel, why in ctx.foreign_packages
+            ],
             "errors": [finding_payload(f) for f in errors],
             "warnings": [finding_payload(f) for f in warnings],
         }
@@ -4470,6 +4504,9 @@ def main(argv: list[str]) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         label = ctx.config.get("repository") or root.name
+        # 外したものを黙って落とさない。検査対象の宣言より先に出す。
+        for name, rel, why in ctx.foreign_packages:
+            print(f"INFO  検査対象外: {name}（{why}） [{rel}]")
         print(f"== 標準準拠検査: {label}（role={ctx.role}, packages={len(ctx.packages)}）")
         for line in collapse_findings(findings):
             print(line)

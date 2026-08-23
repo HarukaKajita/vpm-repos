@@ -2,7 +2,7 @@
   "$schemaVersion": 1,
   "source": {
     "repository": "UnityTemplate_2022_3_22f1",
-    "commit": "ed98082ec9a30f4391a03b459f2f79869dca14a2",
+    "commit": "a82a1a70a1cdef5ce9c7edc2bde8a70db21c685d",
     "dirty": false,
     "profile": "guide"
   },
@@ -15,7 +15,7 @@
     "docs/agentic-unity/editor-window-capture.md": "3917410e7a9bcd3b77a79c67ff17532cbf02cee841fcd9ae4b1347e38789bb49",
     "docs/agentic-unity/imgui-editor-window.md": "d2b15f0e37cf5fd867eecc56006da72a053d32aeb097abd1194052f72b4482ed",
     "docs/agentic-unity/mcp-operations.md": "15bc151c35bef6af0ae3d77e916f119394302e7fcd64ccab6c80552284654208",
-    "docs/agentic-unity/prefab-and-variant.md": "3c9fe5e025131ca2a8a829501c1398ffa84157000f6c0e9ae9515871cf665c7b",
+    "docs/agentic-unity/prefab-and-variant.md": "c943e6b9ffb260500c81f46ede642ef99238d53568358202d370dfba745865eb",
     "scripts/pipeline/check_l10n_catalogs.py": "e2a993a3a0feffb9a6a9cbfe41cc0a825d3ce637183e74d269f836b34431fa49",
     "scripts/pipeline/verify_repo_guide.py": "d3a64a5a2508e0d1009478b7a3e0d1e26cf0769520f89207cb53f832681e6f63"
   }

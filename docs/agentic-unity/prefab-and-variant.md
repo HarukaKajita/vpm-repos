@@ -1,7 +1,7 @@
 <!-- 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
      編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
      source: UnityTemplate_2022_3_22f1/docs/agentic-unity/prefab-and-variant.md
-     source-sha256: cd105a22063e921870573fa5adb6a7d8a0d1425af074f9d079ab085e09b16409 -->
+     source-sha256: 6295f1beb559da84e35d7671df095391d009a88a22fac217ca3cce67f775daee -->
 
 # プレハブ / バリアント / マテリアルバリアントの API の実際
 
@@ -76,3 +76,32 @@ Unity 2022.1 以降、マテリアルは `m_Parent` を持てる（Material Vari
   色差分のように「1 プロパティだけ違う」用途はこれが正しい形。
 - 既存の独立マテリアルをバリアント化するときは、**親と同値のプロパティを子から落とす**ところまでやらないと、
   親を直しても子が追従しない（見た目は変わらないので気づけない）。
+
+### 変換で「見えない override」を焼き付ける罠
+
+見た目を変えずにバリアント化する手順は「変換前を控える → 親を付けて override を全部落とす →
+**控えと違うものだけ**書き戻す」になる。このとき、書き戻す対象は色・数値・テクスチャだけでは足りず、
+テクスチャの scale/offset・キーワード・`renderQueue`・GI フラグ・インスタンシングまで要る。
+
+**「違うときだけ書く」を描画設定にも等しく効かせること。** ここを漏らして無条件に書き戻すと、
+値が同じでも override として焼き付く。とくに `Material.renderQueue` の getter は、カスタムキューが
+無くても**シェーダーの解決済みキュー**を返す。読んで書き戻すだけで `m_CustomRenderQueue` が必ず固定される。
+
+```csharp
+// NG: 同値でも override になる
+mat.renderQueue = before.RenderQueue;
+mat.shaderKeywords = before.Keywords;
+
+// OK: 違うときだけ書く
+if (mat.renderQueue != before.RenderQueue) mat.renderQueue = before.RenderQueue;
+if (!SameKeywords(mat.shaderKeywords, before.Keywords)) mat.shaderKeywords = before.Keywords;
+```
+
+実際に踏んだ例では、変換した 4 枚すべてに `m_ModifiedSerializedProperties: 16` と
+`m_CustomRenderQueue: 2000` / `3000` が付き、片方には親が `0` の `m_LightmapFlags: 4` まで焼き付いた。
+
+**検証範囲は書き戻し範囲と必ず一致させる。** この件では検証が色・数値・テクスチャしか比べておらず、
+壊れているのに「ずれ 0」と報告した。書き戻す対象を広げたら、比較する対象も同じだけ広げる。
+
+`.mat` を直接読めば `m_Parent` / `m_ModifiedSerializedProperties` / `m_CustomRenderQueue` が見えるので、
+**変換後は必ずファイルを確かめる**。API の戻り値だけでは判断できない。

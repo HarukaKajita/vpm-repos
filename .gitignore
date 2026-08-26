@@ -1,2 +1,5 @@
 ﻿.idea
 .vscode
+# 配布された scripts/pipeline/*.py の実行で出る（成果物ではない）
+__pycache__/
+*.pyc

@@ -51,6 +51,34 @@ python3 scripts/pipeline/verify_repo_guide.py   # このリポジトリ自身の
 
 `index.json` の内容確認は、生成後に配信 URL か生成ファイルを直接読んで、対象パッケージの全バージョンが載っていることを確かめます。
 
+## パイプライン整合性の 3 層（配布物・検査・契約）
+
+このリポジトリには、テンプレートリポジトリ `UnityTemplate_2022_3_22f1` から**配布された生成物**があります（GOLD_STANDARD §2.10）。**配布物は編集しないでください。** 変更が必要なときはテンプレートリポジトリ側の正本を直して再配布します（配布物の先頭には `source-sha256` の生成物ヘッダがあり、書き換えると検査 3 が落ちます）。
+
+配布プロファイルは **`guide`**（Unity パッケージを持たないリポジトリ向け）です。標準本体とリリース契約生成器は配られず、エージェンティック Unity 開発の知見・検査・CI・hooks・地図が入ります。
+
+| ファイル | 位置づけ |
+|---|---|
+| `docs/REPOSITORY_MAP.md` | パイプラインのリポジトリ地図（正本は MySite の `pipeline/repositories.json`） |
+| `docs/agentic-unity/` | エージェンティック Unity 開発の知見（撮影・MCP 運用・IMGUI・prefab） |
+| `scripts/pipeline/verify_repo_guide.py` | 標準準拠検査（第 2 層） |
+| `.githooks/` / `.github/workflows/pipeline-verify.yml` | commit / push / CI の関門 |
+| `pipeline/repo.json` | **このリポジトリの手書き宣言**（配布物ではない） |
+
+```bash
+python3 scripts/pipeline/verify_repo_guide.py       # 標準準拠検査。error があれば非ゼロ終了
+```
+
+Windows で `python3` が Microsoft Store のエイリアスへ解決される環境では `python` を使ってください（hook 側はフォールバック済みです）。
+
+- 検査は `git push` の前に `.githooks/pre-push` が走り、**error が 1 件でもあれば push を止めます**（fail-closed）。**`core.hooksPath` は git が追跡できない設定なので、clone のたびに `git config core.hooksPath .githooks` が要ります。** 忘れると配られた hook が一度も走りません。
+- 誤検出や、この対象には筋が通らない指摘は、**検査そのものを消さず** `pipeline/repo.json` の `waivers` へ**理由を添えて**登録します。**期限の型が 3 つあり、どれを選ぶかが「その例外は何を約束しているか」の宣言**になります（スキーマの正本は GOLD_STANDARD §2.10）。
+  - `expiresAt`: 「次のリリースまでに必ず片付ける」。**期日を過ぎると error になり push が止まります。**
+  - 期限を書かない: 「この対象にこの指摘は筋が通らない」が将来も変わらないとき。
+  - `reviewedAt` ＋ `reviewEveryMonths`: 「今は直さなくてよいが、十分に時間が経ったらもう一度考えたい」。期日が来ても止めず **warn で促すだけ**で、見直したら `reviewedAt` を当日へ更新します（その更新が「もう一度考えた」記録になります）。
+
+**このリポジトリ 1 つでは全体像が分かりません。** 標準の正本はテンプレートリポジトリ、運用（レジストリ・商品情報・出品）の正本はサイトリポジトリ（`MySite` ＋ `external-content`）にあります。開発から販売まで回す作業は、**両方をセッションから読める状態にしてから**始めてください（GOLD_STANDARD §2.10。片方しか見えないと「書いてあるか」しか確かめられません）。パイプラインに乗っている全リポジトリの一覧と remote は MySite の `pipeline/repositories.json` が正本で、ローカルパスは機械ごとに違うため `npm run pipeline:repos` で解決結果を確認します。
+
 ## 作業の進め方
 
 - ブランチは `main` 一本です。

@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: dc8304d47b3f9a276aac13b6db37856eaa43ceba4feee8608ecd0a12f32dccdf
+# source-sha256: 66b4d2d870a8a457357e246c597ee5b76569b41e1f291c123fdf25121043cfa4
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -63,6 +63,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import fnmatch
 import hashlib
 import json
@@ -153,6 +154,17 @@ KNOWN_CONFIG_KEYS = frozenset({
     "saleUnit", "packagePolicies", "skillRefs", "skillSync", "waivers",
     "licensePageLanguages", "prePush", "normativeDocs", "externalSkills", "notes",
 })
+
+# waivers[] の 1 件に書いてよいキー。**閉じた集合**として扱う。トップレベルの
+# KNOWN_CONFIG_KEYS と同じ理由だが、こちらは間違えたときの壊れ方が悪い:
+# 打ち間違えたキーは黙って無視され、**期限も見直し周期も持たない永久 waiver** になる。
+# 「1 年後に見直すつもりで書いた宣言が、実は永久に黙らせていた」を防ぐために error にする。
+KNOWN_WAIVER_KEYS = frozenset({
+    "checkId", "target", "reason", "expiresAt", "reviewedAt", "reviewEveryMonths",
+})
+# 見直し周期の上限（月）。これを超える周期は実質の永久 waiver なので、周期を装うより
+# 「周期無しの waiver ＋ 理由」で正直に書かせる。
+MAX_WAIVER_REVIEW_MONTHS = 60
 
 VALID_CHECK_IDS = {
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
@@ -280,6 +292,125 @@ class RepoContext:
 # ---------------------------------------------------------------------------
 # 補助
 # ---------------------------------------------------------------------------
+
+
+def add_months(iso_date: str, months: int) -> str:
+    """`YYYY-MM-DD` に月数を足す。行き先の月に無い日は月末へ丸める（1/31 + 1 か月 = 2/28）。"""
+    year, month, day = (int(part) for part in iso_date.split("-"))
+    year, month = divmod(year * 12 + (month - 1) + months, 12)
+    month += 1
+    return f"{year:04d}-{month:02d}-{min(day, calendar.monthrange(year, month)[1]):02d}"
+
+
+# ---------------------------------------------------------------------------
+# 見直し周期つき waiver（2026-08-27 制定）
+#
+# 【なぜ要るか】waiver には 2 種類の使い道があるのに、表現手段が 1 つしか無かった。
+#   (1) **一時的な例外**「次のリリースまでに必ず片付ける」→ `expiresAt`。期日を過ぎたら
+#       error になり、pre-push が止める。片付けを強制したいのだからこれで正しい。
+#   (2) **恒久的な判断**「この指摘はこの対象については筋が通らない」→ 期限無しの waiver。
+#       ただしこれは**二度と見直されない**。対象が本当に腐っても誰も気づけない。
+# 実際に困ったのは (1) と (2) の中間だった。**「今は直さなくてよいが、十分に時間が経ったら
+# もう一度考えたい」**という判断である。これを `expiresAt` で書くと、期日に error で push が
+# 止まる。止めたいわけではないのに止まるので、次はもっと先の日付へ書き換えるだけになり、
+# 宣言が「考えた記録」ではなく「先送りの記録」に変わる。
+#
+# 【実例】UEL の `install-vcc-add-package.png` は VCC の Manage Packages を写した画像で、
+# 一覧の "Latest Version" 欄にパッケージの版が出る。検査 23-b は版を上げるたびにこの画像を
+# 名指しするが、**この画像が教えているのは「＋ ボタンで追加する」という手順**であって、
+# 写っている版数は本題ではない（実際に一覧へ出るのはその時点の最新版で、画像と一致しない方が
+# 普通である）。版が上がるたびに手作業の撮り直しを迫るのは、検査が価値より手間を生んでいる状態で、
+# 放っておけば包括 waiver で黙らされ、本命の事故ごと見えなくなる（検査 15・23 のコメントが
+# 一貫して警戒している失敗の形）。一方で VCC の UI 自体が作り直されれば撮り直しは要るので、
+# 永久に黙らせるのも間違いである。
+#
+# 【設計】`reviewedAt`（前回見直した日）＋ `reviewEveryMonths`（周期）を宣言できるようにし、
+# 期日が来たら **warn で促すだけ**にする（waiver は効き続け、検査は止まらない）。
+#   - 促されたら実物を開いて確かめる。理由が今も成り立つなら `reviewedAt` を今日へ更新する
+#     （＝「考えた記録」が残る）。成り立たないなら直して waiver を消す。
+#   - `expiresAt` との併記は禁止する。前者は「過ぎたら止める」、後者は「過ぎても止めない」で
+#     意味が逆であり、両方書かれると読み手はどちらの約束なのか判定できない。
+#   - 「今日」の出所は `expiresAt` と同じ（`PIPELINE_TODAY` か最終コミット日）。壁時計を使わない
+#     ので判定は決定的で、テストも CI も同じ結果になる。**コミットが止まっている
+#     リポジトリでは期日も進まない**が、動いていない製品には版上げも撮り直しも無いので実害はない。
+# ---------------------------------------------------------------------------
+
+
+def check_waiver_review_cycle(ctx: "RepoContext", label: str, waiver: dict, check_id: str, today: str) -> None:
+    """`reviewedAt` / `reviewEveryMonths` を検証し、見直しの期日が来ていれば warn で促す。"""
+    interval = waiver.get("reviewEveryMonths")
+    reviewed = waiver.get("reviewedAt")
+    if interval is None and reviewed is None:
+        return
+
+    target = str(waiver.get("target", "")).strip() or None
+    if interval is None:
+        ctx.add(
+            "+",
+            ERROR,
+            f"{label} に reviewedAt はありますが reviewEveryMonths がありません"
+            "（周期が無いと、いつ見直しを促せばよいか決まりません）",
+        )
+        return
+    # bool は int の派生なので先に弾く（`true` を書くと 1 か月として通ってしまう）
+    if isinstance(interval, bool) or not isinstance(interval, int):
+        ctx.add("+", ERROR, f"{label} の reviewEveryMonths は月数（整数）で書いてください: {interval!r}")
+        return
+    if not 1 <= interval <= MAX_WAIVER_REVIEW_MONTHS:
+        ctx.add(
+            "+",
+            ERROR,
+            f"{label} の reviewEveryMonths は 1〜{MAX_WAIVER_REVIEW_MONTHS} か月にしてください: {interval}"
+            "（これより長い周期は実質の永久 waiver です。周期を装うのではなく、周期を付けず"
+            "理由だけで通す形にしてください）",
+        )
+        return
+    if waiver.get("expiresAt") is not None:
+        ctx.add(
+            "+",
+            ERROR,
+            f"{label} が expiresAt と reviewEveryMonths を同時に持っています。expiresAt は"
+            "「この日までに必ず片付ける」（過ぎたら error で止める）、reviewEveryMonths は"
+            "「この周期で見直しを促す」（過ぎても止めない）で、約束の向きが逆です。どちらか一方にしてください",
+        )
+        return
+    if not ISO_DATE_RE.match(str(reviewed)):
+        shown = reviewed if reviewed is not None else "(未設定)"
+        ctx.add(
+            "+",
+            ERROR,
+            f"{label} の reviewedAt は YYYY-MM-DD 形式で書いてください（reviewEveryMonths の起点です）: {shown}",
+        )
+        return
+    reviewed = str(reviewed)
+    if today and reviewed > today:
+        # **error にはしない。** ここでの「今日」は HEAD のコミット日なので、その日の最初の
+        # コミットより前に宣言を書くと、正しい日付でも必ず未来に見える（実際に踏んだ）。
+        # 宣言を書いている最中に検査が止まるのは筋が悪い。一方で遠い未来の日付は
+        # 周期の上限（MAX_WAIVER_REVIEW_MONTHS）を実質的に破る手段になるので、黙ってもいけない。
+        ctx.add(
+            "+",
+            WARN,
+            f"{label} の reviewedAt が「今日」より後です: {reviewed}（比較の基準は HEAD のコミット日 "
+            f"{today}）。**その日の最初のコミットより前ならこれで正常**で、コミットすれば消えます。"
+            "消えないなら本当に未来の日付であり、宣言した周期より長く黙ることになります",
+            target,
+        )
+        return
+
+    due = add_months(reviewed, interval)
+    if not today or due > today:
+        return
+    ctx.add(
+        check_id if check_id in VALID_CHECK_IDS else "+",
+        WARN,
+        f"この対象は waiver で逃がしてありますが、宣言した見直し周期（{interval} か月・前回 {reviewed}）の"
+        f"期日 {due} が来ました。**waiver はまだ効いており、検査は止めていません**"
+        f"（{label}）。実物を開いて、逃がしている理由が今も成り立つか確かめてください。"
+        f"成り立つなら reviewedAt を今日の日付へ更新するだけでよく（それが「もう一度考えた」記録になります）、"
+        f"成り立たないなら直して waiver を消してください",
+        target,
+    )
 
 
 def run_git(root: Path, *args: str) -> str:
@@ -433,8 +564,22 @@ def check_00_config(ctx: RepoContext) -> None:
     for index, waiver in enumerate(ctx.config.get("waivers") or []):
         label = f"waivers[{index}]"
         if not isinstance(waiver, dict):
-            ctx.add("+", ERROR, f"{label} はオブジェクトである必要があります（checkId / target / reason / expiresAt）")
+            ctx.add(
+                "+",
+                ERROR,
+                f"{label} はオブジェクトである必要があります"
+                f"（{' / '.join(sorted(KNOWN_WAIVER_KEYS))}）",
+            )
             continue
+        unknown = sorted(set(waiver) - KNOWN_WAIVER_KEYS)
+        if unknown:
+            ctx.add(
+                "+",
+                ERROR,
+                f"{label} に未知のキーがあります: {', '.join(unknown)}"
+                f"（書けるのは {' / '.join(sorted(KNOWN_WAIVER_KEYS))}）。"
+                "打ち間違えたキーは黙って無視されるため、期限も見直し周期も無い**永久 waiver** になります",
+            )
         check_id = str(waiver.get("checkId", ""))
         if check_id not in VALID_CHECK_IDS:
             ctx.add("+", ERROR, f"{label} の checkId が未知です: {check_id or '(未設定)'}")
@@ -448,6 +593,7 @@ def check_00_config(ctx: RepoContext) -> None:
                 ctx.add("+", ERROR, f"{label} の expiresAt は YYYY-MM-DD 形式で書いてください: {expires}")
             elif today and str(expires) < today:
                 ctx.add("+", ERROR, f"{label} は {expires} に期限切れです: {waiver.get('target')}")
+        check_waiver_review_cycle(ctx, label, waiver, check_id, today)
 
     # 法文だけ言語を絞る方針を採るときの宣言。宣言があれば検査 17 が error で厳密に照合し、
     # 無ければ warn に留める。空配列を許すと「全部消す」宣言と「書き忘れ」が区別できない
@@ -3593,6 +3739,13 @@ def check_22_registry_sale_unit(ctx: RepoContext) -> None:
 # 【版数軸をなぜ画像ごとにするか】どの画像に版数が写るかは**ファイル名から絞れる**ので、
 # 面へ丸めずに 1 枚ずつ名指しできる（絞り込みの根拠は VERSION_BEARING_* のコメント）。
 #
+# 【版数が本題でない画像の扱い】版数が写ってはいるが、その画像が教えているのは**手順**であって
+# 版数ではないことがある（UEL の `install-vcc-add-package.png` は VCC の一覧の "Latest Version" に
+# 版が出るが、示したいのは「＋ ボタンで追加する」である）。この形に撮り直しを迫り続けると、
+# 検査が価値より手間を生み、いずれ包括 waiver で黙らされて本命の事故ごと見えなくなる。
+# 掲載面の本文へ「版数は撮影時のもの」と明記した上で、`reviewEveryMonths` 付きの waiver で
+# 見直し周期を宣言する（VCC の UI 自体が作り直されることはあるので、永久に黙らせはしない）。
+#
 # 【24 時間の許容幅】画像と実装は**別リポジトリ**にあり、同じ作業でもどちらを先にコミットするかは
 # 決まっていない。実測で UMPD は画像（external-content）を先に、実装（製品リポジトリ）を
 # 9 分後にコミットしており、素朴な前後比較では正しい作業が誤検出になった。1 回の作業は 1 日に
@@ -3842,7 +3995,11 @@ def check_23_stale_product_page_images(ctx: RepoContext) -> None:
             f"（1.1.5 / 1.1.1 / 1.1.7）が焼き込まれたまま出荷寸前まで進み、うち 1 枚は"
             f"Booth のギャラリー画像で読める大きさでした（2026-08-15 検出）。"
             f"**この検査は画像の中の文字を読めません**（OCR を持たないため、版数が実際に"
-            f"写っているかは判定していません）。開いて確かめ、版数が写っていれば撮り直してください",
+            f"写っているかは判定していません）。開いて確かめ、版数が写っていれば撮り直してください。"
+            f"**版数がその画像の本題でないなら**（示したいのは導入の手順で、写っている版数は付随物"
+            f"にすぎないなら）、撮り直す代わりに掲載面の本文へ「版数は撮影時のもの」と明記し、"
+            f"`reviewEveryMonths` を付けた waiver で見直し周期を宣言してください"
+            f"（版を上げるたびに手作業の撮り直しを迫る検査は、やがて包括 waiver で黙らされます）",
             rel,
         )
 

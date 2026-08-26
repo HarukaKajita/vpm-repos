@@ -2,7 +2,7 @@
   "$schemaVersion": 1,
   "source": {
     "repository": "UnityTemplate_2022_3_22f1",
-    "commit": "a82a1a70a1cdef5ce9c7edc2bde8a70db21c685d",
+    "commit": "f7126071da0ac82d4ffeeaeb9547af56bd123213",
     "dirty": false,
     "profile": "guide"
   },
@@ -12,11 +12,11 @@
     ".github/workflows/pipeline-verify.yml": "4715986ec6baa54ed5b31f0c029256c9ff2564c11b5a0e5658d2865e0cde3548",
     "docs/REPOSITORY_MAP.md": "a103d5aa46fb5e78073e78513e3802ef8f9f44ca8d1ffc3059aa6cf40b2725a1",
     "docs/agentic-unity/README.md": "dc21db9788115589ec4eab2ba4692761d1b4ed6219c60d8640fe3a7a1ed46659",
-    "docs/agentic-unity/editor-window-capture.md": "3917410e7a9bcd3b77a79c67ff17532cbf02cee841fcd9ae4b1347e38789bb49",
+    "docs/agentic-unity/editor-window-capture.md": "57d48029dd0593c575caa68271fa8697dc321758841b2df5a25b595acc22a049",
     "docs/agentic-unity/imgui-editor-window.md": "d2b15f0e37cf5fd867eecc56006da72a053d32aeb097abd1194052f72b4482ed",
     "docs/agentic-unity/mcp-operations.md": "15bc151c35bef6af0ae3d77e916f119394302e7fcd64ccab6c80552284654208",
     "docs/agentic-unity/prefab-and-variant.md": "c943e6b9ffb260500c81f46ede642ef99238d53568358202d370dfba745865eb",
     "scripts/pipeline/check_l10n_catalogs.py": "e2a993a3a0feffb9a6a9cbfe41cc0a825d3ce637183e74d269f836b34431fa49",
-    "scripts/pipeline/verify_repo_guide.py": "d3a64a5a2508e0d1009478b7a3e0d1e26cf0769520f89207cb53f832681e6f63"
+    "scripts/pipeline/verify_repo_guide.py": "1d4349bc808f8eb67211f133bc1beebec85616d56012df1918fd86440fa9973d"
   }
 }

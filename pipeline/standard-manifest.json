@@ -2,12 +2,12 @@
   "$schemaVersion": 1,
   "source": {
     "repository": "UnityTemplate_2022_3_22f1",
-    "commit": "254af48fc0afbb254d81052dc97b5b535f0f52fe",
+    "commit": "8fbd418484302d5229c840f2a4170a1a8851ed0d",
     "dirty": false,
     "profile": "guide"
   },
   "files": {
-    ".githooks/pre-commit": "add4060f7b3c7364a0a9a087e20ce461aa1f5b428430d9794b4728cb803d6990",
+    ".githooks/pre-commit": "0c3c0c59407ea460bd5a3e9c5a1a569db7c9e6aa4c5bcb15604572517bc8fb0f",
     ".githooks/pre-push": "5cdf7c89290baf9f115587ec34e7ba6797aac7fa7d90060b7e49c282ad42c39f",
     ".github/workflows/pipeline-verify.yml": "4715986ec6baa54ed5b31f0c029256c9ff2564c11b5a0e5658d2865e0cde3548",
     "docs/REPOSITORY_MAP.md": "a103d5aa46fb5e78073e78513e3802ef8f9f44ca8d1ffc3059aa6cf40b2725a1",
@@ -17,6 +17,6 @@
     "docs/agentic-unity/mcp-operations.md": "15bc151c35bef6af0ae3d77e916f119394302e7fcd64ccab6c80552284654208",
     "docs/agentic-unity/prefab-and-variant.md": "c943e6b9ffb260500c81f46ede642ef99238d53568358202d370dfba745865eb",
     "scripts/pipeline/check_l10n_catalogs.py": "e2a993a3a0feffb9a6a9cbfe41cc0a825d3ce637183e74d269f836b34431fa49",
-    "scripts/pipeline/verify_repo_guide.py": "1d4349bc808f8eb67211f133bc1beebec85616d56012df1918fd86440fa9973d"
+    "scripts/pipeline/verify_repo_guide.py": "c422021942152134d4ae8559e26c2bae1003e35c43a86729b0bef0b0b3ab18c2"
   }
 }

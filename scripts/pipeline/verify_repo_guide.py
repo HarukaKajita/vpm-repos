@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 66b4d2d870a8a457357e246c597ee5b76569b41e1f291c123fdf25121043cfa4
+# source-sha256: 8b1b47bd36115095b565e33b4604d8750451b701a0045d67a5ca969610b8530c
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -414,10 +414,42 @@ def check_waiver_review_cycle(ctx: "RepoContext", label: str, waiver: dict, chec
 
 
 def run_git(root: Path, *args: str) -> str:
+    # git の出力（パス・コミットメッセージ・差分）は UTF-8。既定の文字コードで読むと、Windows で
+    # PYTHONUTF8 を設定していない環境では日本語を含む出力の読み取りに失敗して stdout が None になり、
+    # 呼び出し側が落ちる（`git log -p` を読む検査 23 で実際に落ちた）。
     result = subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=False
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
     return result.stdout if result.returncode == 0 else ""
+
+
+def git_ignored_paths(root: Path, paths: set[str] | list[str]) -> set[str]:
+    """`paths`（リポジトリ相対）のうち、git に無視されるものを返す。
+
+    判定は `git check-ignore` に任せる（`.gitignore`・`.git/info/exclude`・`core.excludesFile` の
+    すべてを git 自身の規則で解釈させ、ここで無視規則を再実装しない）。**追跡済みのファイルは
+    無視規則に一致しても返らない**（git の既定。追跡済みはコミットされる側なので正しい）。
+    git を実行できない・リポジトリではない場合は空集合を返し、呼び出し側は全件を対象に残す
+    （無視されると判定できないものを黙って外さない）。
+    """
+    candidates = sorted(set(paths))
+    if not candidates:
+        return set()
+    result = subprocess.run(
+        ["git", "-C", str(root), "check-ignore", "-z", "--stdin"],
+        input=("\0".join(candidates) + "\0").encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    # 0 = 1 件以上が無視される / 1 = 1 件も無視されない。それ以外は判定できていない
+    if result.returncode not in (0, 1):
+        return set()
+    return {item for item in result.stdout.decode("utf-8", errors="replace").split("\0") if item}
 
 
 def load_json(path: Path) -> dict | None:
@@ -944,6 +976,10 @@ def check_06_meta_completeness(ctx: RepoContext) -> None:
             if not (ctx.root / rel).is_file():
                 ctx.add("6", ERROR, "テンプレート GUID bootstrap がありません", rel)
 
+        # 見るのは `Assets/` と**このリポジトリが所有する** package だけ（`ctx.packages`）。VPM が展開した
+        # パッケージや vpm-manifest.json で宣言した第三者パッケージ（vpm-resolver など）は build_context が
+        # 所有外として外している。第三者パッケージの GUID は配布元が固定しており、どのプロジェクトでも
+        # 同じ値なので、テンプレートから派生先へ複製されても重複の問題を起こさない。
         source_roots = [ctx.root / "Assets"] + [package_dir for _, package_dir, _ in ctx.packages]
         meta_paths: set[str] = set()
         for source_root in source_roots:
@@ -953,7 +989,11 @@ def check_06_meta_completeness(ctx: RepoContext) -> None:
                 if path.is_file():
                     meta_paths.add(path.relative_to(ctx.root).as_posix())
 
-        for rel in sorted(meta_paths):
+        # .gitignore で無視されるものはコミットされえないので、テンプレートへの混入ではない。
+        # テンプレートを Unity で開くと、MCP for Unity の Roslyn（`Assets/Plugins/Roslyn/`）のように
+        # 無視対象のフォルダへ .meta が生成される。これを数えると、正本を開いただけで検査が赤くなり、
+        # pre-commit も pre-push も通らなくなる（2026-09-14 に実際にテンプレートで commit できなくなった）。
+        for rel in sorted(meta_paths - git_ignored_paths(ctx.root, meta_paths)):
             ctx.add(
                 "6",
                 ERROR,

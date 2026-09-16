@@ -2,7 +2,7 @@
   "$schemaVersion": 1,
   "source": {
     "repository": "UnityTemplate_2022_3_22f1",
-    "commit": "8fbd418484302d5229c840f2a4170a1a8851ed0d",
+    "commit": "4a375277e6272336e0b8127704afb6aca42719fd",
     "dirty": false,
     "profile": "guide"
   },
@@ -17,6 +17,6 @@
     "docs/agentic-unity/mcp-operations.md": "15bc151c35bef6af0ae3d77e916f119394302e7fcd64ccab6c80552284654208",
     "docs/agentic-unity/prefab-and-variant.md": "c943e6b9ffb260500c81f46ede642ef99238d53568358202d370dfba745865eb",
     "scripts/pipeline/check_l10n_catalogs.py": "e2a993a3a0feffb9a6a9cbfe41cc0a825d3ce637183e74d269f836b34431fa49",
-    "scripts/pipeline/verify_repo_guide.py": "c422021942152134d4ae8559e26c2bae1003e35c43a86729b0bef0b0b3ab18c2"
+    "scripts/pipeline/verify_repo_guide.py": "b1e70220eddb137f3ead36e6bbb6757c177a042b3106e4d3a79d22c0ed79afa1"
   }
 }

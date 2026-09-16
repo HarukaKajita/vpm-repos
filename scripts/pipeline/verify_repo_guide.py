@@ -2,7 +2,7 @@
 # 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
 # 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
 # source: UnityTemplate_2022_3_22f1/scripts/pipeline/verify_repo_guide.py
-# source-sha256: 8b1b47bd36115095b565e33b4604d8750451b701a0045d67a5ca969610b8530c
+# source-sha256: 32481e051436a6a929333e4b6d5745251760d32ef4818676c8f48adba02e57ef
 """リポジトリガイドと実装の整合を機械検証する（ゴールド標準 §2.10 第2層）。
 
 原則: **文書がリポジトリ自身の状態について主張することは、すべて機械で確かめられる。**
@@ -49,7 +49,10 @@
 - そこで検査対象から外すのは、**機械的な事実 2 つで「所有物ではない」と説明できるもの**だけに限る。
     (a) `git ls-files Packages/<name>/` が 1 件も無い ＝ そもそもこのリポジトリの中身ではない
     (b) `Packages/vpm-manifest.json` の `dependencies` / `locked` に名前がある ＝ 第三者を vendoring
-        しただけだと宣言済み（VPM resolver のように意図的にコミットするものがここに該当する）
+        しただけだと宣言済み（VPM resolver のように意図的にコミットするものがここに該当する）。
+        ただし `pipeline/repo.json` の `saleUnit.packages` / `packagePolicies` で所有を宣言した
+        package は (b) に当たっても外さない（VCC / ALCOM のユーザーパッケージとして自分の
+        package を入れると vpm-manifest.json に載るため。2026-09-17 追加）
 - **`--paths <glob>` 方式を採らないのと同じ理由**で、パターンによる絞り込みは入れない。上の 2 つは
   「見なかったことにする」ではなく「所有していない」の判定であり、しかも**外したものは必ず
   INFO 行で全件表示する**（消さない・隠さない）。
@@ -171,7 +174,12 @@ VALID_CHECK_IDS = {
     "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "+",
 }
 VALID_ROLES = {"standard", "product", "internal", "site", "content", "infra", "sandbox"}
-ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "vpm-zip", "pdf"}
+# assets-unitypackage は Assets/<saleUnit.displayName>/ へ展開される .unitypackage（2026-09-17 追加）
+ARTIFACT_KINDS = {"sale-zip", "tgz", "unitypackage", "assets-unitypackage", "vpm-zip", "pdf"}
+# パッケージの中身から作る成果物（saleUnit.packages が無いと成果物集合を決められない）
+PACKAGE_ARTIFACT_KINDS = {"tgz", "unitypackage", "assets-unitypackage", "vpm-zip"}
+# ファイル名やルートフォルダ名が saleUnit.displayName から決まる成果物
+DISPLAY_NAME_ARTIFACT_KINDS = {"sale-zip", "assets-unitypackage"}
 
 
 # ---------------------------------------------------------------------------
@@ -650,8 +658,15 @@ def check_00_config(ctx: RepoContext) -> None:
         if sale_unit:
             distribution = set(sale_unit.get("distribution") or [])
             # パッケージ由来の成果物を配る商品だけが packages を必要とする（技術同人誌の pdf 等は不要）
-            if distribution & {"tgz", "unitypackage", "vpm-zip"} and not sale_unit.get("packages"):
+            if distribution & PACKAGE_ARTIFACT_KINDS and not sale_unit.get("packages"):
                 ctx.add("+", ERROR, "saleUnit.packages がありません（成果物集合を決定できません）")
+            needs_display_name = sorted(distribution & DISPLAY_NAME_ARTIFACT_KINDS)
+            if needs_display_name and not str(sale_unit.get("displayName") or "").strip():
+                ctx.add(
+                    "+",
+                    ERROR,
+                    f"saleUnit.displayName がありません（{', '.join(needs_display_name)} の名前を決定できません）",
+                )
             if sale_unit.get("versionPolicy") not in {"lockstep", "primary"}:
                 ctx.add("+", ERROR, "saleUnit.versionPolicy は lockstep か primary である必要があります")
             for kind in sale_unit.get("distribution") or []:
@@ -1055,8 +1070,9 @@ def check_07_path_length(ctx: RepoContext) -> None:
             tail = tracked[len(prefix) :]
             # UPM 出品レイアウト（<package-name>/ 起算）
             roots = [(f"{name}/{tail}", "UPM")]
-            # .unitypackage 出品レイアウト（Assets/<DisplayName>/ 起算）は起点が長くなる
-            if "unitypackage" in distribution and display_name:
+            # .unitypackage 出品レイアウト（Assets/<DisplayName>/ 起算）は起点が長くなる。
+            # assets-unitypackage は利用者のプロジェクトでも実際にこの起点へ展開される
+            if distribution & {"unitypackage", "assets-unitypackage"} and display_name:
                 roots.append((f"Assets/{display_name}/{tail}", ".unitypackage"))
             for logical, layout in roots:
                 if len(logical) >= MAX_PATH_LENGTH:
@@ -1171,7 +1187,8 @@ def check_09_sale_unit(ctx: RepoContext) -> None:
         display_names.add(sale_unit["displayName"])
     package_names = {name for name, _, _ in ctx.packages}
 
-    patterns = [re.compile(rf"^{re.escape(d)}-\d+\.\d+\.\d+.*\.zip$") for d in display_names if d]
+    # 販売単位の名前で書き出すのは zip と、Assets 配置の .unitypackage（assets-unitypackage）
+    patterns = [re.compile(rf"^{re.escape(d)}-\d+\.\d+\.\d+.*\.(zip|unitypackage)$") for d in display_names if d]
     patterns += [re.compile(rf"^{re.escape(n)}-\d+\.\d+\.\d+.*\.(tgz|unitypackage|zip)$") for n in package_names]
     patterns.append(re.compile(r"^release-\d+\.\d+\.\d+.*\.json$"))
 
@@ -4593,6 +4610,13 @@ def build_context(root: Path) -> RepoContext:
     # VPM が解決した第三者パッケージの宣言。dependencies と locked の両方を見る。
     vpm = load_json(root / "Packages" / "vpm-manifest.json") or {}
     vpm_declared = set(vpm.get("locked") or {}) | set(vpm.get("dependencies") or {})
+    # repo.json で所有を宣言した package は、vpm-manifest.json に載っていても第三者として扱わない。
+    # 自分の package を VCC / ALCOM のユーザーパッケージとして開発プロジェクトへ入れると、
+    # vpm-manifest.json に自分の名前が記録される（実測 2026-09-17: Sparkler）。名前だけで
+    # 「第三者」と判定すると、所有物の検査が丸ごと抜け落ちる。
+    owned_names = set((config.get("saleUnit") or {}).get("packages") or []) | set(
+        config.get("packagePolicies") or {}
+    )
 
     packages_dir = root / "Packages"
     if packages_dir.is_dir():
@@ -4607,7 +4631,7 @@ def build_context(root: Path) -> RepoContext:
             if rel not in tracked_dirs:
                 ctx.foreign_packages.append((meta["name"], rel, "git 未追跡"))
                 continue
-            if meta["name"] in vpm_declared:
+            if meta["name"] in vpm_declared and meta["name"] not in owned_names:
                 ctx.foreign_packages.append((meta["name"], rel, "vpm-manifest.json 由来"))
                 continue
             ctx.packages.append((meta["name"], entry, meta))

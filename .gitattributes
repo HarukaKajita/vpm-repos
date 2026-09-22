@@ -1,0 +1,69 @@
+# 生成物: この内容はテンプレートリポジトリ UnityTemplate_2022_3_22f1 から配布されたコピーです。
+# 編集はテンプレート側で行い、scripts/distribute_standard.py で再配布してください。
+# source: UnityTemplate_2022_3_22f1/scripts/templates/gitattributes
+# source-sha256: 5ae04afe3f6ba8bd45db840bb6a30de3a62503c53c9de337ab7cc261e15d2c2c
+# 改行コードの統一ルール（全リポジトリ共通・2026-09-22 制定）
+#
+# 方針: リポジトリ内（blob）も作業ツリーも LF に固定する。macOS と Windows を
+# 行き来しても同じバイト列になり、OS の違いで差分が出ない。
+#
+# なぜ core.autocrlf ではなくこのファイルで持つのか:
+#   core.autocrlf / core.eol はマシンごとの git 設定で、リポジトリが追跡できない。
+#   clone のたびに設定が要る運用は core.hooksPath で既に破綻を経験している。
+#   .gitattributes はリポジトリに入るので、clone した全員へ自動的に効く。
+#
+# なぜ LF なのか:
+#   パイプラインの配布鮮度検査は配布物を正本とバイト単位で照合する。CRLF が混じると
+#   内容が 1 バイトも違わなくても「配り忘れ」と判定され、テンプレートの push が
+#   fail-closed で止まる（2026-09-22 に実際に発生）。しかも git は text=auto の正規化で
+#   無差分に見せるため、git status では一生気付けない。Unity・C# ツールチェーン・
+#   Node・Python はいずれも LF を問題なく扱うので、LF 固定に実害はない。
+
+* text=auto eol=lf
+
+# Windows 専用スクリプトだけは CRLF。cmd.exe は行末に CR を前提にする場面がある。
+# PowerShell (.ps1) は LF で問題なく動くので上の既定に従う。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# バイナリ。text=auto の自動判定は NUL バイトの有無で決めるため、NUL を含まない
+# バイナリ（.ai / .eps など）が text と誤判定され、改行変換で中身が壊れうる。
+# 実際 TechBook_GenerativeProgramming1 の .ai は CRLF のまま追跡されていた。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.bmp binary
+*.ico binary
+*.tga binary
+*.psd binary
+*.psb binary
+*.exr binary
+*.hdr binary
+*.ai binary
+*.eps binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.aiff binary
+*.mp4 binary
+*.webm binary
+*.mov binary
+*.fbx binary
+*.blend binary
+*.dll binary
+*.pdb binary
+*.so binary
+*.dylib binary
+*.bundle binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.tgz binary
+*.unitypackage binary
